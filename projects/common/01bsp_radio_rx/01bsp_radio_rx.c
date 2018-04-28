@@ -128,8 +128,8 @@ int mote_main(void) {
    board_init();
    
    // add callback functions radio
-   sctimer_setStartFrameCb(cb_startFrame);
-   sctimer_setEndFrameCb(cb_endFrame);
+   radio_setStartFrameCb(cb_startFrame);
+   radio_setEndFrameCb(cb_endFrame);
    
    // setup UART
    uart_setCallbacks(cb_uartTxDone,cb_uartRxCb);

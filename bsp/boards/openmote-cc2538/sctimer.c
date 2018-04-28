@@ -19,6 +19,8 @@
 
 typedef struct {
     sctimer_cbt sctimer_cb;
+    //sctimer_capture_cbt startFrameCb;
+    //sctimer_capture_cbt endFrameCb;
 } sctimer_vars_t;
 
 sctimer_vars_t sctimer_vars;
@@ -42,6 +44,15 @@ void sctimer_init(void){
 void sctimer_set_callback(sctimer_cbt cb){
     sctimer_vars.sctimer_cb = cb;
 }
+/*
+void sctimer_setStartFrameCb(sctimer_capture_cbt cb){
+    sctimer_vars.startFrameCb = cb;
+}*/
+/*
+void sctimer_setEndFrameCb(sctimer_capture_cbt cb){
+    sctimer_vars.endFrameCb = cb;
+}
+*/
 
 /**
 \brief set compare interrupt

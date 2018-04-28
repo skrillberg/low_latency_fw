@@ -1,0 +1,6 @@
+eclipse.preferences.version=1
+environment/project/cdt.managedbuild.config.gnu.cross.exe.debug.580840232/PATH/delimiter=\:
+environment/project/cdt.managedbuild.config.gnu.cross.exe.debug.580840232/PATH/operation=replace
+environment/project/cdt.managedbuild.config.gnu.cross.exe.debug.580840232/PATH/value=/bin\:/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/usr/games\:/usr/local/games\:/usr/bin
+environment/project/cdt.managedbuild.config.gnu.cross.exe.debug.580840232/append=true
+environment/project/cdt.managedbuild.config.gnu.cross.exe.debug.580840232/appendContributed=true

@@ -21,16 +21,30 @@ end of frame event), it will turn on its error LED.
 #include "radio.h"
 #include "leds.h"
 #include "sctimer.h"
+#include "source/gpio.h"
+#include <headers/hw_memmap.h>
+#include <headers/hw_ints.h>
+#include "source/interrupt.h"
 
 //=========================== defines =========================================
 
-#define LENGTH_PACKET   125+LENGTH_CRC ///< maximum length is 127 bytes
-#define CHANNEL         11             ///< 11=2.405GHz
+#define LENGTH_PACKET   8+LENGTH_CRC ///< maximum length is 127 bytes
+#define CHANNEL         12             ///< 11=2.405GHz
+#define TX_CHANNEL	13	       /// tx channel of individual mote 
 #define TIMER_PERIOD    0xffff         ///< 0xffff = 2s@32kHz
-#define ID              0x99           ///< byte sent in the packets
-
+#define ID              0xff           ///< byte sent in the packets
+#define isTx	true
+#define NUM_ATTEMPTS	2	       ///<number of times packet is resent
+#define RxMOTE		true
+#define MOTE_NUM	2	           // index that sets rx mote channel
+#define MULTICHAN_TX    true
+#define CHANNEL_HOP	1		//number of channels to hop by 
 //=========================== variables =======================================
+//bool isTx = true;
 
+uint32_t tx_count; //count used to keep track of how many packet resends have happened
+uint32_t count; //counter for verifying packet contents
+uint32_t debounce_complete; // used to debounce button press in interrupt handler
 enum {
    APP_FLAG_START_FRAME = 0x01,
    APP_FLAG_END_FRAME   = 0x02,
@@ -61,12 +75,48 @@ typedef struct {
 } app_vars_t;
 
 app_vars_t app_vars;
-
+uint8_t txed;
 //=========================== prototypes ======================================
 
 void     cb_startFrame(PORT_TIMER_WIDTH timestamp);
 void     cb_endFrame(PORT_TIMER_WIDTH timestamp);
 void     cb_timer(void);
+void     cb_button(void);
+void	 configure_pins(void);
+
+void configure_pins(void){
+
+   volatile uint32_t i;	
+
+   for(i =0xFFFF;i!=0;i-- );
+      GPIOPinIntDisable(GPIO_A_BASE,GPIO_PIN_2);
+     GPIOPinIntClear(GPIO_A_BASE,GPIO_PIN_2);
+
+      GPIOPinIntDisable(GPIO_A_BASE,GPIO_PIN_3);	
+   
+      GPIOPinIntClear(GPIO_A_BASE,GPIO_PIN_3);
+
+  // if(RxMOTE == false){
+	
+   
+ 
+
+      GPIOPinTypeGPIOInput(GPIO_A_BASE,GPIO_PIN_2);
+
+      GPIOIntTypeSet(GPIO_A_BASE,GPIO_PIN_2, GPIO_RISING_EDGE);
+
+      GPIOPortIntRegister(GPIO_A_BASE, cb_button);
+
+      GPIOPinIntClear(GPIO_A_BASE,GPIO_PIN_2);
+
+      GPIOPinIntEnable(GPIO_A_BASE,GPIO_PIN_2);
+   //kill switch
+
+
+      GPIOPinTypeGPIOInput(GPIO_A_BASE,GPIO_PIN_3);
+   //}
+
+}
 
 //=========================== main ============================================
 
@@ -74,6 +124,15 @@ void     cb_timer(void);
 \brief The program starts executing here.
 */
 int mote_main(void) {
+
+uint16_t passphrase[4] = {0xB5,0xAC,0xBA,0XE5}; 
+
+count = 0; //counter for verifying packet contents
+uint32_t byte_masks[4]={0xff000000,0x00ff0000,0x0000ff00,0x000000ff}; //used to access each byte of counter
+tx_count =0; //count used to keep track of how many packet resends have happened
+txed = 0;
+uint32_t last_pin_state = 0;
+	int j=0;
    uint8_t i;
    
    // clear local variables
@@ -86,35 +145,65 @@ int mote_main(void) {
    radio_setStartFrameCb(cb_startFrame);
    radio_setEndFrameCb(cb_endFrame);
    
-   // prepare packet
+   // prepare packet. This loads the 32bit counter into the packet
    app_vars.packet_len = sizeof(app_vars.packet);
    for (i=0;i<app_vars.packet_len;i++) {
-      app_vars.packet[i] = ID;
+	if(i<4){
+	   app_vars.packet[i]=count&byte_masks[i];
+	}
+	else{
+		if(!RxMOTE){
+      	   		app_vars.packet[i] = passphrase[i-4];
+		}else{
+			app_vars.packet[i] = 0xAB;
+		}
+	}
    }
    
    // start bsp timer
-   sctimer_set_callback(cb_timer);
-   sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
-   sctimer_enable();
+  // sctimer_set_callback(cb_timer);
+   //sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
+   //sctimer_enable();
    
    // prepare radio
    radio_rfOn();
-   radio_setFrequency(CHANNEL);
-   
-   // switch in RX by default
-   radio_rxEnable();
+
+   if(RxMOTE){
+      radio_setFrequency(CHANNEL+CHANNEL_HOP*(MOTE_NUM-1));
+   }
+   else if(MULTICHAN_TX){
+      radio_setFrequency(CHANNEL);
+   }else if(!MULTICHAN_TX){
+	radio_setFrequency(TX_CHANNEL);
+   }
+   //set button int
+
+   configure_pins();
+
+
+   // switch in RX by default (only if rxmote?)
+   if(RxMOTE){
+      radio_rxEnable();
+   } else{
+	HWREG(RFCORE_XREG_RXENABLE) = 0;
+   }
    app_vars.state = APP_STATE_RX;
    
    // start by a transmit
-   app_vars.flags |= APP_FLAG_TIMER;
-   
+
+   if(!RxMOTE){
+     app_vars.flags |= APP_FLAG_TIMER;
+   }
+     tx_count = 3; //needed to reset tx system because of the above line otherwise you get an intial packet send
+   //}
+
+
    while (1) {
-      
-      // sleep while waiting for at least one of the flags to be set
-      while (app_vars.flags==0x00) {
-         board_sleep();
-      }
-      
+
+      //while (app_vars.flags==0x00) {
+       //  board_sleep();
+      //}
+
       // handle and clear every flag
       while (app_vars.flags) {
          
@@ -130,12 +219,16 @@ int mote_main(void) {
                   
                   // led
                   leds_error_on();
+
                   break;
                case APP_STATE_TX:
                   // started sending a packet
                   
                   // led
+
                   leds_sync_on();
+		
+
                   break;
             }
             
@@ -165,23 +258,67 @@ int mote_main(void) {
                      &app_vars.rxpk_lqi,
                      &app_vars.rxpk_crc
                   );
-                  
+                  if(app_vars.packet[4] ==0xB5 ){
+			//leds_debug_on();
+		  }else{
+
+			//leds_debug_off();
+		  }
                   // led
                   leds_error_off();
+		  
+		  if((app_vars.rxpk_crc != 0) && (app_vars.packet[4] == 0xB5) && (app_vars.packet[5] == 0xAC) && (app_vars.packet[6] == 0xBA) && (app_vars.packet[7] == 0xE5)){
+			
+			switch (last_pin_state){
+			case 0:
+				last_pin_state = 1;
+	          		GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
+				leds_debug_on();
+				break;
+			case 1: 
+				last_pin_state = 0;
+				GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,0x00);
+				leds_debug_off();
+				break;
+			}
+		  }
                   break;
                case APP_STATE_TX:
                   // done sending a packet
-                  
-                  // switch to RX mode
-                  radio_rxEnable();
+                  if(RxMOTE == false){
+		     tx_count++; //increment attempt counter
+		     if((MULTICHAN_TX) && (tx_count<=1)){
+		        radio_setFrequency(CHANNEL+tx_count*CHANNEL_HOP);
+		     }
+		     //if number of attempts hasn't been reached, reset tx_timer flag to resend
+		     if(GPIOPinRead(GPIO_A_BASE, GPIO_PIN_3)!=0) {
+		        //leds_debug_on();
+		     }else{leds_debug_off();}
+		     if((tx_count<NUM_ATTEMPTS) &&(GPIOPinRead(GPIO_A_BASE, GPIO_PIN_3)==0) ){
+
+		        app_vars.flags |= APP_FLAG_TIMER;
+
+		     }else{
+                        tx_count=0;
+		     }
+		  }
+                  // switch to RX mode (only if rxmote?)
+                  if(RxMOTE){
+                     radio_rxEnable();
+                  }
                   app_vars.state = APP_STATE_RX;
                   
-                  // led
+                  // leds reset after tx
                   leds_sync_off();
+		  GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,0);
+		 
                   break;
             }
             // clear flag
             app_vars.flags &= ~APP_FLAG_END_FRAME;
+
+	    //GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,0x00);
+	    //GPIOPinWrite(GPIO_A_BASE, GPIO_PIN_3,0);
          }
          
          
@@ -189,27 +326,49 @@ int mote_main(void) {
          
          if (app_vars.flags & APP_FLAG_TIMER) {
             // timer fired
-            
-            if (app_vars.state==APP_STATE_RX) {
-               // stop listening
-               radio_rfOff();
-               
-               // prepare packet
-               app_vars.packet_len = sizeof(app_vars.packet);
-               for (i=0;i<app_vars.packet_len;i++) {
+           
+               if (app_vars.state==APP_STATE_RX) {
+
+                  // stop listening
+                  radio_rfOff();
+
+                  /* this method is from original bsp and isn't used for the counter based packet
+                  // prepare packet
+                  app_vars.packet_len = sizeof(app_vars.packet);
+                  for (i=0;i<app_vars.packet_len;i++) {
                   app_vars.packet[i] = ID;
                }
-               
+               */
+		   // prepare packet. This loads the 32bit counter into the packet
+   		   app_vars.packet_len = sizeof(app_vars.packet);
+   		   for (i=0;i<app_vars.packet_len;i++) {
+			   if(i<4){
+	   		   	app_vars.packet[i]=count&byte_masks[i];
+			   }
+			   else{
+				if(!RxMOTE){
+      	   		   		app_vars.packet[i] = passphrase[i-4];
+				}
+				else{
+					app_vars.packet[i] = 0xAB;
+				}
+			   }
+   		   }
+
                // start transmitting packet
-               radio_loadPacket(app_vars.packet,app_vars.packet_len);
-               radio_txEnable();
-               radio_txNow();
+
+                  radio_loadPacket(app_vars.packet,app_vars.packet_len);
+
+                  radio_txEnable();
+                  radio_txNow();
                
-               app_vars.state = APP_STATE_TX;
-            }
-            
+                  app_vars.state = APP_STATE_TX;
+
+               }
+           // }
             // clear flag
             app_vars.flags &= ~APP_FLAG_TIMER;
+	    
          }
       }
    }
@@ -234,11 +393,59 @@ void cb_endFrame(PORT_TIMER_WIDTH timestamp) {
 }
 
 void cb_timer(void) {
+
+   /*if((GPIOPinRead(GPIO_D_BASE,GPIO_PIN_1)==0) && (GPIOPinRead(GPIO_D_BASE,GPIO_PIN_0)==0)){
+      leds_error_on();
+   }
+   else{
+      leds_error_off();
+   }*/
+
    // set flag
-   app_vars.flags |= APP_FLAG_TIMER;
+	
+   //GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
+  // if(isTx){
+     // GPIOPinTypeGPIOOutput(GPIO_D_BASE, GPIO_PIN_0);
+      //GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,0xff);
+	//txed=1;
+      //app_vars.flags |= APP_FLAG_TIMER;
+
+		
+   //}
+   //app_vars.flags |= APP_STATE_RX;
    
    // update debug stats
-   app_dbg.num_timer++;
+   //app_dbg.num_timer++;
    
-   sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
+   //sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
+
+ 
 }
+
+void cb_button(void){
+   //uint32_t i;
+  // app_vars.flags |= APP_FLAG_TIMER;
+   count++; //increment counter 
+   tx_count = 0; //reset number of previous tx attempts 
+   GPIOPinIntClear(GPIO_A_BASE, GPIO_PIN_2);
+   //leds_sync_on();
+   if(RxMOTE==false && MULTICHAN_TX){
+      radio_setFrequency(CHANNEL);
+   }
+   debounce_complete = 0;
+   for(uint32_t i =0;i<10;i++){
+   }
+   if(GPIOPinRead(GPIO_A_BASE, GPIO_PIN_2)!=0){
+      debounce_complete=1;
+   }
+
+   if(debounce_complete){
+      app_vars.flags |= APP_FLAG_TIMER;
+   }
+
+   //}
+   //for(i =10000;i!=0;i-- );
+   //leds_sync_off(); 
+
+}
+

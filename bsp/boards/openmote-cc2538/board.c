@@ -73,17 +73,17 @@ void board_init(void) {
    
    gpio_init();
    clock_init();
-   board_timer_init();
+   //board_timer_init();
    leds_init();
-   debugpins_init();
-   button_init();
-   sctimer_init();
-   uart_init();
+   //debugpins_init();
+   //button_init();
+   //sctimer_init();
+   //uart_init();
    radio_init();
-   i2c_init();
-   sensors_init();
-   cryptoengine_init();
-   pwm_init();
+   //i2c_init();
+   //sensors_init();
+   //cryptoengine_init();
+   //pwm_init();
 }
 
 /**
