@@ -17,6 +17,7 @@ end of frame event), it will turn on its error LED.
 \author Thomas Watteyne <watteyne@eecs.berkeley.edu>, August 2014.
 */
 
+
 #include "board.h"
 #include "radio.h"
 #include "leds.h"
@@ -25,17 +26,20 @@ end of frame event), it will turn on its error LED.
 #include <headers/hw_memmap.h>
 #include <headers/hw_ints.h>
 #include "source/interrupt.h"
+#include <headers/hw_rfcore_sfr.h>
+#include <headers/hw_rfcore_sfr.h>
+#include <headers/hw_rfcore_xreg.h>
 
 //=========================== defines =========================================
 
 #define LENGTH_PACKET   8+LENGTH_CRC ///< maximum length is 127 bytes
 #define CHANNEL         12             ///< 11=2.405GHz
-#define TX_CHANNEL	13	       /// tx channel of individual mote 
+#define TX_CHANNEL	12	       /// tx channel of individual mote 
 #define TIMER_PERIOD    0xffff         ///< 0xffff = 2s@32kHz
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
 #define NUM_ATTEMPTS	2	       ///<number of times packet is resent
-#define RxMOTE		true
+#define RxMOTE		false
 #define MOTE_NUM	2	           // index that sets rx mote channel
 #define MULTICHAN_TX    true
 #define CHANNEL_HOP	1		//number of channels to hop by 
@@ -165,10 +169,11 @@ uint32_t last_pin_state = 0;
    //sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
    //sctimer_enable();
    
-   // prepare radio
-   radio_rfOn();
-
+   // prepare radio (all this does is turn on the receiver using ths ISRXON instruction strobe)
+   //radio_rfOn();
+   //radio_rxEnable();
    if(RxMOTE){
+      radio_rfOn();
       radio_setFrequency(CHANNEL+CHANNEL_HOP*(MOTE_NUM-1));
    }
    else if(MULTICHAN_TX){
@@ -185,7 +190,8 @@ uint32_t last_pin_state = 0;
    if(RxMOTE){
       radio_rxEnable();
    } else{
-	HWREG(RFCORE_XREG_RXENABLE) = 0;
+	HWREG(RFCORE_XREG_RXENABLE) = 0; //disable rx
+	HWREG(RFCORE_XREG_FRMCTRL1)    = HWREG(RFCORE_XREG_FRMCTRL1) & 0b110; //prevents stxon instruction from enabling rx, this is really important because it prevents tx motes from ever receiving anything 
    }
    app_vars.state = APP_STATE_RX;
    
@@ -329,7 +335,7 @@ uint32_t last_pin_state = 0;
            
                if (app_vars.state==APP_STATE_RX) {
 
-                  // stop listening
+                  // stop listening (this doesn't do much)
                   radio_rfOff();
 
                   /* this method is from original bsp and isn't used for the counter based packet
@@ -360,6 +366,8 @@ uint32_t last_pin_state = 0;
                   radio_loadPacket(app_vars.packet,app_vars.packet_len);
 
                   radio_txEnable();
+
+		//should i get rid of this if the mote is an rxmote? this could be a good idea 
                   radio_txNow();
                
                   app_vars.state = APP_STATE_TX;
@@ -423,7 +431,7 @@ void cb_timer(void) {
 }
 
 void cb_button(void){
-   //uint32_t i;
+   uint32_t k;
   // app_vars.flags |= APP_FLAG_TIMER;
    count++; //increment counter 
    tx_count = 0; //reset number of previous tx attempts 
@@ -433,7 +441,7 @@ void cb_button(void){
       radio_setFrequency(CHANNEL);
    }
    debounce_complete = 0;
-   for(uint32_t i =0;i<10;i++){
+   for( k =0;k<10;k++){
    }
    if(GPIOPinRead(GPIO_A_BASE, GPIO_PIN_2)!=0){
       debounce_complete=1;
