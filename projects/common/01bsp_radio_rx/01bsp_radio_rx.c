@@ -72,8 +72,8 @@ len=17  num=84  rssi=-81  lqi=108 crc=1
 
 //=========================== defines =========================================
 
-#define LENGTH_PACKET        20+LENGTH_CRC ///< maximum length is 127 bytes
-#define CHANNEL              12            ///< 11 = 2.405GHz
+#define LENGTH_PACKET        8+LENGTH_CRC ///< maximum length is 127 bytes
+#define CHANNEL              20            ///< 11 = 2.405GHz
 #define LENGTH_SERIAL_FRAME  8              ///< length of the serial frame
 
 //=========================== variables =======================================
@@ -120,7 +120,7 @@ void cb_uartRxCb(void);
 \brief The program starts executing here.
 */
 int mote_main(void) {
-   
+   int i=0;
    // clear local variables
    memset(&app_vars,0,sizeof(app_vars_t));
    
@@ -146,7 +146,7 @@ int mote_main(void) {
       // sleep while waiting for at least one of the rxpk_done to be set
       app_vars.rxpk_done = 0;
       while (app_vars.rxpk_done==0) {
-         board_sleep();
+        // board_sleep();
       }
       
       // if I get here, I just received a packet
@@ -169,14 +169,8 @@ int mote_main(void) {
       app_vars.uart_done          = 0;
       app_vars.uart_lastTxByte    = 0;
       
-      // send app_vars.uart_txFrame over UART
-      uart_clearTxInterrupts();
-      uart_clearRxInterrupts();
-      uart_enableInterrupts();
-      uart_writeByte(app_vars.uart_txFrame[app_vars.uart_lastTxByte]);
-      while (app_vars.uart_done==0); // busy wait to finish
-      uart_disableInterrupts();
-      
+	for(i=0; i<1000; i++){
+}
       // led
       leds_error_off();
    }

@@ -119,8 +119,8 @@ void cb_radioTimerOverflows(void) {
    
    // update debug vals
    app_dbg.num_radioTimerOverflows++;
-  // uint32_t r = rand()%16 +11; // choose a random channel between 11 and 26
-   uint32_t r = (rand()+1)%2*6 +14; // choose a random channel from 14 or 20
+   uint32_t r = rand()%16 +11; // choose a random channel between 11 and 26
+  // uint32_t r = (rand()+1)%2*6 +14; // choose a random channel from 14 or 20
 	
    uint32_t rtime = rand()%TIMER_PERIOD +10; //choose a random count value between 10 and TIMER_PERIOD + 10
    radio_setFrequency(r); 
