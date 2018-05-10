@@ -181,7 +181,7 @@ int mote_main(void) {
       app_vars.uart_done          = 0;
       app_vars.uart_lastTxByte    = 0;
       	int packet_valid;
-	  packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xB5) && (app_vars.rxpk_buf[5] == 0xAC)  && (app_vars.rxpk_buf[6] == 0xBA) && (app_vars.rxpk_buf[7] == 0xE5));
+	  packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xB5) && (app_vars.rxpk_buf[5] == 0xAC)  && (app_vars.rxpk_buf[6] == 0xA5) && (app_vars.rxpk_buf[7] == 0xB1));
 	  if(packet_valid){
 
 		if((app_vars.rxpk_buf[0] == 3) || (app_vars.rxpk_buf[0] ==1)){

@@ -158,7 +158,7 @@ void configure_pins(void){
 */
 int mote_main(void) {
 
-uint16_t passphrase[4] = {0xB5,0xAC,0xBA,0XE5}; 
+uint16_t passphrase[4] = {0xB5,0xAC,0xA5,0XB1}; 
 tx_packet_count=0; //reset packet sent counter
 rx_packet_count=0; //reset packet rx counter
 //count = 0; //counter for verifying packet contents
@@ -301,49 +301,8 @@ uint32_t last_pin_state = 0;
                   leds_error_off();
 
 
-		  
-		  packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.packet[4] == 0xB5) && (app_vars.packet[5] == 0xAC) && (app_vars.packet[6] == 0xBA) && (app_vars.packet[7] == 0xE5));
-		  if(packet_valid){
-			
-			
-			switch (last_pin_state){
-  			case 0:
-				last_pin_state = 1;
-	          		
-				//leds_debug_on();
-				if((app_vars.packet[0] == 3) || (app_vars.packet[0] ==1)){
-					leds_sync_on();
-					GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
-					//set right output pin high 
-				}
-				if((app_vars.packet[0] == 3) || (app_vars.packet[0] == 2)){
-					leds_debug_on();
-					GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,GPIO_PIN_1);
-				//set left output pin high
-				}
+		
 
-				break;
-			case 1: 
-				last_pin_state = 0;
-				
-				//leds_debug_off();
-
-				if((app_vars.packet[0] == 3) || (app_vars.packet[0] ==1)){
-					leds_sync_off();
-					GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
-					//set right output pin high 
-				}
-				if((app_vars.packet[0] == 3) || (app_vars.packet[0] == 2)){
-					leds_debug_off();
-					GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,GPIO_PIN_1);
-					//set left output pin high
-				}
-
-				break;
-			}
-
-		  }
-		  count_from_packet = 0;
 
                   break;
                case APP_STATE_TX:
@@ -479,35 +438,7 @@ void cb_endFrame(PORT_TIMER_WIDTH timestamp) {
    app_dbg.num_endFrame++;
 }
 
-void cb_timer(void) {
 
-   /*if((GPIOPinRead(GPIO_D_BASE,GPIO_PIN_1)==0) && (GPIOPinRead(GPIO_D_BASE,GPIO_PIN_0)==0)){
-      leds_error_on();
-   }
-   else{
-      leds_error_off();
-   }*/
-
-   // set flag
-	
-   //GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
-  // if(isTx){
-     // GPIOPinTypeGPIOOutput(GPIO_D_BASE, GPIO_PIN_0);
-      //GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,0xff);
-	//txed=1;
-      //app_vars.flags |= APP_FLAG_TIMER;
-
-		
-   //}
-   //app_vars.flags |= APP_STATE_RX;
-   
-   // update debug stats
-   //app_dbg.num_timer++;
-   
-   //sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
-
- 
-}
 
 void cb_count_rx(void){
 rx_packet_count++;
@@ -561,28 +492,5 @@ void cb_button(void){
 
 }
 
-void cb_button2(void){
-   uint32_t k;
-  // app_vars.flags |= APP_FLAG_TIMER;
-   //count++; //increment counter 
-   tx_packet_count++;
-   tx_count = 0; //reset number of previous tx attempts 
-   GPIOPinIntClear(GPIO_A_BASE, GPIO_PIN_3);
-   //leds_sync_on();
-   if(RxMOTE==false && MULTICHAN_TX){
-      radio_setFrequency(CHANNEL);
-   }
-   debounce_complete = 0;
-   for( k =0;k<10;k++){
-   }
-   if(GPIOPinRead(GPIO_A_BASE, GPIO_PIN_3)!=0){
-      debounce_complete=1;
-   }
 
-   if(debounce_complete ){
-      app_vars.flags |= APP_FLAG_TIMER;
-   }
-
-
-}
 
