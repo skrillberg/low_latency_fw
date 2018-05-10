@@ -39,7 +39,7 @@ end of frame event), it will turn on its error LED.
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
 #define NUM_ATTEMPTS	2	       ///<number of times packet is resent, needs to match number of motes for multichan experiments
-#define RxMOTE		true
+#define RxMOTE		false
 #define MOTE_NUM	1	           // index that sets rx mote channel
 #define MULTICHAN_TX    false
 #define CHANNEL_HOP	6		//number of channels to hop by 

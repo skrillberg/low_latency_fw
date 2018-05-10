@@ -69,6 +69,8 @@ len=17  num=84  rssi=-81  lqi=108 crc=1
 #include "leds.h"
 #include "uart.h"
 #include "sctimer.h"
+#include <headers/hw_memmap.h>
+#include "source/gpio.h"
 
 //=========================== defines =========================================
 
@@ -110,9 +112,7 @@ void cb_radioTimerOverflows(void);
 // radio
 void cb_startFrame(PORT_TIMER_WIDTH timestamp);
 void cb_endFrame(PORT_TIMER_WIDTH timestamp);
-// uart
-void cb_uartTxDone(void);
-void cb_uartRxCb(void);
+
 
 //=========================== main ============================================
 
@@ -132,7 +132,7 @@ int mote_main(void) {
    radio_setEndFrameCb(cb_endFrame);
    
    // setup UART
-   uart_setCallbacks(cb_uartTxDone,cb_uartRxCb);
+  // uart_setCallbacks(cb_uartTxDone,cb_uartRxCb);
    
    // prepare radio
    radio_rfOn();
@@ -140,13 +140,25 @@ int mote_main(void) {
    
    // switch in RX
    radio_rxEnable();
-   
+   uint8_t packet[10] = {0,0,0,0,0,0,0,0,0,0};
+   radio_loadPacket(packet,LENGTH_PACKET);
+   radio_txEnable();
+   radio_txNow();
    while (1) {
-      
+      int j = 0;
       // sleep while waiting for at least one of the rxpk_done to be set
       app_vars.rxpk_done = 0;
       while (app_vars.rxpk_done==0) {
-        // board_sleep();
+       // leds_debug_on();
+	j=0;
+	//while(j<1000000){
+	//	j+=1;
+	//}
+	j=0;
+	//leds_debug_off();
+	//while(j<1000000){
+	//	j+=1;
+	//}
       }
       
       // if I get here, I just received a packet
@@ -168,10 +180,45 @@ int mote_main(void) {
       
       app_vars.uart_done          = 0;
       app_vars.uart_lastTxByte    = 0;
-      
-	for(i=0; i<1000; i++){
-}
-      // led
+      	int packet_valid;
+	  packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xB5) && (app_vars.rxpk_buf[5] == 0xAC)  && (app_vars.rxpk_buf[6] == 0xBA) && (app_vars.rxpk_buf[7] == 0xE5));
+	  if(packet_valid){
+
+		if((app_vars.rxpk_buf[0] == 3) || (app_vars.rxpk_buf[0] ==1)){
+			leds_sync_on();
+			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
+			//set right output pin high 
+		}
+		if((app_vars.rxpk_buf[0] == 3) || (app_vars.rxpk_buf[0] == 2)){
+			leds_debug_on();
+			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,GPIO_PIN_1);
+		//set left output pin high
+		}
+
+		
+	
+
+		
+		//leds_debug_off();
+
+		if((app_vars.rxpk_buf[0] == 3) || (app_vars.rxpk_buf[0] ==1)){
+			leds_sync_off();
+			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
+			//set right output pin high 
+		}
+		if((app_vars.rxpk_buf[0] == 3) || (app_vars.rxpk_buf[0] == 2)){
+			leds_debug_off();
+			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,GPIO_PIN_1);
+			//set left output pin high
+		}
+
+			
+		}
+
+	  for(j=0;j<10000;j++){
+	}	
+	GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,0);
+	GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,0);
       leds_error_off();
    }
 }
@@ -212,27 +259,6 @@ void cb_endFrame(PORT_TIMER_WIDTH timestamp) {
    leds_sync_off();
 }
 
-//===== uart
 
-void cb_uartTxDone(void) {
-   
-   uart_clearTxInterrupts();
-   
-   // prepare to send the next byte
-   app_vars.uart_lastTxByte++;
-   
-   if (app_vars.uart_lastTxByte<sizeof(app_vars.uart_txFrame)) {
-      uart_writeByte(app_vars.uart_txFrame[app_vars.uart_lastTxByte]);
-   } else {
-      app_vars.uart_done=1;
-   }
-}
 
-void cb_uartRxCb(void) {
-   
-   //  uint8_t byte;
-   uart_clearRxInterrupts();
-   
-   // toggle LED
-   leds_debug_toggle();
-}
+
