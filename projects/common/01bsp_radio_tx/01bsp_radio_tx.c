@@ -21,10 +21,10 @@ remainder of the packet contains an incrementing bytes.
 
 //=========================== defines =========================================
 
-#define LENGTH_PACKET   125+LENGTH_CRC // maximum length is 127 bytes
-#define CHANNEL         11             // 11 = 2.405GHz
-#define TIMER_PERIOD    (32768>>1)     // (32768>>1) = 500ms @ 32kHz
-
+#define LENGTH_PACKET   8+LENGTH_CRC // maximum length is 127 bytes
+#define CHANNEL         12             // 11 = 2.405GHz
+#define TIMER_PERIOD    (32768>>9)     // (32768>>1) = 500ms @ 32kHz
+//#define TIMER_PERIOD    (32768)
 //=========================== variables =======================================
 
 typedef struct {
@@ -77,7 +77,8 @@ int mote_main(void) {
    radio_rfOff();
    
    // start periodic overflow
-   sctimer_setCompare(TIMER_PERIOD);
+
+   sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
    sctimer_enable();
    
    while(1) {
@@ -85,7 +86,7 @@ int mote_main(void) {
       // wait for timer to elapse
       app_vars.txpk_txNow = 0;
       while (app_vars.txpk_txNow==0) {
-         board_sleep();
+         //board_sleep();
       }
       
       // led
@@ -118,7 +119,12 @@ void cb_radioTimerOverflows(void) {
    
    // update debug vals
    app_dbg.num_radioTimerOverflows++;
-   
+  // uint32_t r = rand()%16 +11; // choose a random channel between 11 and 26
+   uint32_t r = (rand()+1)%2*6 +14; // choose a random channel from 14 or 20
+	
+   uint32_t rtime = rand()%TIMER_PERIOD +10; //choose a random count value between 10 and TIMER_PERIOD + 10
+   radio_setFrequency(r); 
+	sctimer_setCompare(sctimer_readCounter()+rtime);
    // ready to send next packet
    app_vars.txpk_txNow = 1;
 }

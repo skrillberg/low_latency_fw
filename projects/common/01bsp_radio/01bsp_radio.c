@@ -33,21 +33,22 @@ end of frame event), it will turn on its error LED.
 //=========================== defines =========================================
 
 #define LENGTH_PACKET   8+LENGTH_CRC ///< maximum length is 127 bytes
-#define CHANNEL         12             ///< 11=2.405GHz
-#define TX_CHANNEL	12	       /// tx channel of individual mote 
+#define CHANNEL         14             ///< 11=2.405GHz
+#define TX_CHANNEL	20	       /// tx channel of individual mote 
 #define TIMER_PERIOD    0xffff         ///< 0xffff = 2s@32kHz
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
-#define NUM_ATTEMPTS	2	       ///<number of times packet is resent
+#define NUM_ATTEMPTS	2	       ///<number of times packet is resent, needs to match number of motes for multichan experiments
 #define RxMOTE		false
 #define MOTE_NUM	2	           // index that sets rx mote channel
 #define MULTICHAN_TX    true
-#define CHANNEL_HOP	1		//number of channels to hop by 
+#define CHANNEL_HOP	6		//number of channels to hop by 
 //=========================== variables =======================================
 //bool isTx = true;
 
 uint32_t tx_count; //count used to keep track of how many packet resends have happened
-uint32_t count; //counter for verifying packet contents
+uint32_t tx_packet_count; //counter for verifying packet contents
+uint32_t rx_packet_count;
 uint32_t debounce_complete; // used to debounce button press in interrupt handler
 enum {
    APP_FLAG_START_FRAME = 0x01,
@@ -86,6 +87,7 @@ void     cb_startFrame(PORT_TIMER_WIDTH timestamp);
 void     cb_endFrame(PORT_TIMER_WIDTH timestamp);
 void     cb_timer(void);
 void     cb_button(void);
+void	 cb_count_rx(void);
 void	 configure_pins(void);
 
 void configure_pins(void){
@@ -118,6 +120,18 @@ void configure_pins(void){
 
 
       GPIOPinTypeGPIOInput(GPIO_A_BASE,GPIO_PIN_3);
+
+	if(RxMOTE){
+		GPIOPinTypeGPIOInput(GPIO_A_BASE,GPIO_PIN_4); //ad5 is rx counter increment
+
+     	 //GPIOIntTypeSet(GPIO_A_BASE,GPIO_PIN_4, GPIO_RISING_EDGE);
+	
+     	 //GPIOPortIntRegister(GPIO_A_BASE, cb_count_rx);
+
+      	//GPIOPinIntClear(GPIO_A_BASE,GPIO_PIN_4);
+	 //GPIOPinIntEnable(GPIO_A_BASE,GPIO_PIN_4);
+
+	}
    //}
 
 }
@@ -130,11 +144,14 @@ void configure_pins(void){
 int mote_main(void) {
 
 uint16_t passphrase[4] = {0xB5,0xAC,0xBA,0XE5}; 
-
-count = 0; //counter for verifying packet contents
+tx_packet_count=0; //reset packet sent counter
+rx_packet_count=0; //reset packet rx counter
+//count = 0; //counter for verifying packet contents
 uint32_t byte_masks[4]={0xff000000,0x00ff0000,0x0000ff00,0x000000ff}; //used to access each byte of counter
 tx_count =0; //count used to keep track of how many packet resends have happened
 txed = 0;
+uint32_t packet_valid;
+uint32_t count_from_packet = 0;
 uint32_t last_pin_state = 0;
 	int j=0;
    uint8_t i;
@@ -153,7 +170,7 @@ uint32_t last_pin_state = 0;
    app_vars.packet_len = sizeof(app_vars.packet);
    for (i=0;i<app_vars.packet_len;i++) {
 	if(i<4){
-	   app_vars.packet[i]=count&byte_masks[i];
+	   app_vars.packet[i]=(tx_packet_count&byte_masks[i])>>(8*(3-i));
 	}
 	else{
 		if(!RxMOTE){
@@ -272,8 +289,17 @@ uint32_t last_pin_state = 0;
 		  }
                   // led
                   leds_error_off();
+		  for(i=0;i<3;i++){
+			//count_from_packet += (((uint32_t)app_vars.packet[i])<<(8*(3-i)));
+		  }
+		  count_from_packet += app_vars.packet[3];
+		  count_from_packet += ((uint32_t)app_vars.packet[2] << 8);
+		  count_from_packet += ((uint32_t)app_vars.packet[1] << 16);
+		  count_from_packet += ((uint32_t)app_vars.packet[0] << 24);
+
 		  
-		  if((app_vars.rxpk_crc != 0) && (app_vars.packet[4] == 0xB5) && (app_vars.packet[5] == 0xAC) && (app_vars.packet[6] == 0xBA) && (app_vars.packet[7] == 0xE5)){
+		  packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.packet[4] == 0xB5) && (app_vars.packet[5] == 0xAC) && (app_vars.packet[6] == 0xBA) && (app_vars.packet[7] == 0xE5));
+		  if(packet_valid){
 			
 			switch (last_pin_state){
 			case 0:
@@ -288,6 +314,7 @@ uint32_t last_pin_state = 0;
 				break;
 			}
 		  }
+		  count_from_packet = 0;
                   break;
                case APP_STATE_TX:
                   // done sending a packet
@@ -299,7 +326,8 @@ uint32_t last_pin_state = 0;
 		     //if number of attempts hasn't been reached, reset tx_timer flag to resend
 		     if(GPIOPinRead(GPIO_A_BASE, GPIO_PIN_3)!=0) {
 		        //leds_debug_on();
-		     }else{leds_debug_off();}
+		     }else{//leds_debug_off();
+			}
 		     if((tx_count<NUM_ATTEMPTS) &&(GPIOPinRead(GPIO_A_BASE, GPIO_PIN_3)==0) ){
 
 		        app_vars.flags |= APP_FLAG_TIMER;
@@ -349,7 +377,7 @@ uint32_t last_pin_state = 0;
    		   app_vars.packet_len = sizeof(app_vars.packet);
    		   for (i=0;i<app_vars.packet_len;i++) {
 			   if(i<4){
-	   		   	app_vars.packet[i]=count&byte_masks[i];
+	  			 app_vars.packet[i]=(tx_packet_count&byte_masks[i])>>(8*(3-i));
 			   }
 			   else{
 				if(!RxMOTE){
@@ -368,8 +396,9 @@ uint32_t last_pin_state = 0;
                   radio_txEnable();
 
 		//should i get rid of this if the mote is an rxmote? this could be a good idea 
+
                   radio_txNow();
-               
+    
                   app_vars.state = APP_STATE_TX;
 
                }
@@ -430,10 +459,15 @@ void cb_timer(void) {
  
 }
 
+void cb_count_rx(void){
+rx_packet_count++;
+   GPIOPinIntClear(GPIO_A_BASE, GPIO_PIN_4);
+}
 void cb_button(void){
    uint32_t k;
   // app_vars.flags |= APP_FLAG_TIMER;
-   count++; //increment counter 
+   //count++; //increment counter 
+   tx_packet_count++;
    tx_count = 0; //reset number of previous tx attempts 
    GPIOPinIntClear(GPIO_A_BASE, GPIO_PIN_2);
    //leds_sync_on();
@@ -447,7 +481,7 @@ void cb_button(void){
       debounce_complete=1;
    }
 
-   if(debounce_complete){
+   if(debounce_complete ){
       app_vars.flags |= APP_FLAG_TIMER;
    }
 
