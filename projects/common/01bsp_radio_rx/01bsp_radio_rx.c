@@ -71,12 +71,14 @@ len=17  num=84  rssi=-81  lqi=108 crc=1
 #include "sctimer.h"
 #include <headers/hw_memmap.h>
 #include "source/gpio.h"
-
+#include "i2c.h"
 //=========================== defines =========================================
 
 #define LENGTH_PACKET        8+LENGTH_CRC ///< maximum length is 127 bytes
-#define CHANNEL              20            ///< 11 = 2.405GHz
-#define LENGTH_SERIAL_FRAME  8              ///< length of the serial frame
+#define CHANNEL              26           ///< 11 = 2.405GHz
+#define LENGTH_SERIAL_FRAME  3              ///< length of the serial frame
+#define I2C_ON				 false		///IF TRUE, user must connect I2C pin to slave device (GP1 : SCL GP2 : SDA)
+#define I2C_ADDRESS			 0x08
 
 //=========================== variables =======================================
 
@@ -98,9 +100,10 @@ typedef struct {
               uint8_t    rxpk_lqi;
               bool       rxpk_crc;
    // uart
-              uint8_t    uart_txFrame[LENGTH_SERIAL_FRAME];
-              uint8_t    uart_lastTxByte;
-   volatile   uint8_t    uart_done;
+              uint8_t    i2c_txFrame[LENGTH_SERIAL_FRAME];
+              uint8_t    i2c_lastTxByte;
+              uint8_t	 i2c_pktpp;
+   volatile   uint8_t    i2c_done;
 } app_vars_t;
 
 app_vars_t app_vars;
@@ -126,13 +129,14 @@ int mote_main(void) {
    
    // initialize board
    board_init();
-   
+//   i2c_init();
+
    // add callback functions radio
    radio_setStartFrameCb(cb_startFrame);
    radio_setEndFrameCb(cb_endFrame);
    
    // setup UART
-  // uart_setCallbacks(cb_uartTxDone,cb_uartRxCb);
+   // uart_setCallbacks(cb_uartTxDone,cb_uartRxCb);
    
    // prepare radio
    radio_rfOn();
@@ -144,21 +148,17 @@ int mote_main(void) {
    radio_loadPacket(packet,LENGTH_PACKET);
    radio_txEnable();
    radio_txNow();
+ 	int packet_valid;
+
    while (1) {
+	   /*Added by SY*/
+//	   memset(&app_vars,0,sizeof(app_vars_t));
+	   packet_valid = 0;
       int j = 0;
       // sleep while waiting for at least one of the rxpk_done to be set
       app_vars.rxpk_done = 0;
       while (app_vars.rxpk_done==0) {
        // leds_debug_on();
-	j=0;
-	//while(j<1000000){
-	//	j+=1;
-	//}
-	j=0;
-	//leds_debug_off();
-	//while(j<1000000){
-	//	j+=1;
-	//}
       }
       
       // if I get here, I just received a packet
@@ -169,57 +169,63 @@ int mote_main(void) {
       leds_error_on();
       
       // format frame to send over serial port
-      app_vars.uart_txFrame[0] = app_vars.rxpk_len;  // packet length
-      app_vars.uart_txFrame[1] = app_vars.rxpk_num;  // packet number
-      app_vars.uart_txFrame[2] = app_vars.rxpk_rssi; // RSSI
-      app_vars.uart_txFrame[3] = app_vars.rxpk_lqi;  // LQI
-      app_vars.uart_txFrame[4] = app_vars.rxpk_crc;  // CRC
-      app_vars.uart_txFrame[5] = 0xff;               // closing flag
-      app_vars.uart_txFrame[6] = 0xff;               // closing flag
-      app_vars.uart_txFrame[7] = 0xff;               // closing flag
+      app_vars.i2c_pktpp = 0x00;
+
+      app_vars.i2c_txFrame[0] = app_vars.i2c_pktpp;  // packet length
+      app_vars.i2c_txFrame[1] = app_vars.rxpk_rssi; // RSSI
+      app_vars.i2c_txFrame[2] = app_vars.rxpk_crc;  // CRC
+      //app_vars.i2c_txFrame[3] = app_vars.rxpk_lqi;  // LQI
+      //app_vars.i2c_txFrame[4] = app_vars.rxpk_num;  // packet number
+      //app_vars.i2c_txFrame[5] = app_vars.rxpk_len;  // packet length
+      //app_vars.i2c_txFrame[6] = 0xff;               // closing flag
+      //app_vars.i2c_txFrame[7] = 0xff;               // closing flag
       
-      app_vars.uart_done          = 0;
-      app_vars.uart_lastTxByte    = 0;
-      	int packet_valid;
-	  packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xB5) && (app_vars.rxpk_buf[5] == 0xAC)  && (app_vars.rxpk_buf[6] == 0xA5) && (app_vars.rxpk_buf[7] == 0xB1));
+      app_vars.i2c_done          = 0;
+      app_vars.i2c_lastTxByte    = 0;
+
+
+
+//      packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0x0C) && (app_vars.rxpk_buf[5] == 0xCE)  && (app_vars.rxpk_buf[6] == 0xAC) && (app_vars.rxpk_buf[7] == 0x5F)); //mote 1
+	  packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xE6) && (app_vars.rxpk_buf[5] == 0x6F)  && (app_vars.rxpk_buf[6] == 0x80) && (app_vars.rxpk_buf[7] == 0xCE)); //mote 2
 	  if(packet_valid){
 
-		if((app_vars.rxpk_buf[0] == 3) || (app_vars.rxpk_buf[0] ==1)){
+		//set left output pin high
+		if((app_vars.rxpk_buf[0] == 0xFF)){
 			leds_sync_on();
 			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
-			//set right output pin high 
-		}
-		if((app_vars.rxpk_buf[0] == 3) || (app_vars.rxpk_buf[0] == 2)){
+			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
+			if(I2C_ON){
+				app_vars.i2c_pktpp = 0x01;
+				app_vars.i2c_txFrame[0] = app_vars.i2c_pktpp;
+				i2c_write_bytes(I2C_ADDRESS, app_vars.i2c_txFrame, LENGTH_SERIAL_FRAME); //send data through i2c (add 12/28/18)
+			}
+			else for(j=0;j<1000;j++);
+	  	}
+
+	  	if((app_vars.rxpk_buf[0] == 0xAA)){
 			leds_debug_on();
 			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,GPIO_PIN_1);
-		//set left output pin high
+			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
+			if (I2C_ON){
+				app_vars.i2c_pktpp = 0x01;
+				app_vars.i2c_txFrame[0] = app_vars.i2c_pktpp;
+				i2c_write_bytes(I2C_ADDRESS, app_vars.i2c_txFrame, LENGTH_SERIAL_FRAME); //send data through i2c (add 12/28/18)
+			}
+			else for(j=0;j<1000;j++);
 		}
 
-		
-	
-
-		
-		//leds_debug_off();
-
-		if((app_vars.rxpk_buf[0] == 3) || (app_vars.rxpk_buf[0] ==1)){
-			leds_sync_off();
-			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
-			//set right output pin high 
-		}
-		if((app_vars.rxpk_buf[0] == 3) || (app_vars.rxpk_buf[0] == 2)){
-			leds_debug_off();
-			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,GPIO_PIN_1);
-			//set left output pin high
-		}
-
-			
-		}
-
-	  for(j=0;j<10000;j++){
-	}	
-	GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,0);
-	GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,0);
-      leds_error_off();
+	  	GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,0);
+		GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,0);
+		GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,0);
+    	leds_error_off();
+	  }
+	  else {
+		  if (I2C_ON){
+			  	  i2c_write_bytes(I2C_ADDRESS, app_vars.i2c_txFrame, LENGTH_SERIAL_FRAME); //send data through i2c (add 12/28/18)
+		  }
+	  }
+	  /*Added by SY*/
+	  memset(&app_vars,0,sizeof(app_vars_t));
    }
 }
 
@@ -228,13 +234,15 @@ int mote_main(void) {
 //===== radio
 
 void cb_startFrame(PORT_TIMER_WIDTH timestamp) {
-   
+   /*Added by SY*/
+//   GPIOPinWrite(GPIO_A_BASE,GPIO_PIN_2,GPIO_PIN_2);
    // update debug stats
    app_dbg.num_startFrame++;
 }
 
 void cb_endFrame(PORT_TIMER_WIDTH timestamp) {
-   
+	/*Added by SY*/
+//	GPIOPinWrite(GPIO_A_BASE,GPIO_PIN_2,0);
    // update debug stats
    app_dbg.num_endFrame++;
    // indicate I just received a packet
