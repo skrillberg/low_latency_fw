@@ -34,16 +34,16 @@ end of frame event), it will turn on its error LED.
 //=========================== defines =========================================
 
 #define LENGTH_PACKET   8+LENGTH_CRC ///< maximum length is 127 bytes
-#define CHANNEL         11             ///< 11=2.405GHz
-#define TX_CHANNEL	11				/// tx channel of individual mote
+#define CHANNEL         16             ///< 11=2.405GHz
+#define TX_CHANNEL	16	       /// tx channel of individual mote
 #define TIMER_PERIOD    0xffff         ///< 0xffff = 2s@32kHz
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
-#define NUM_ATTEMPTS	4	       ///<number of times packet is resent, needs to match number of motes for multichan experiments
+#define NUM_ATTEMPTS	3	       ///<number of times packet is resent, needs to match number of motes for multichan experiments
 #define RxMOTE		false
 #define MOTE_NUM	1	           // index that sets rx mote channel
 #define MULTICHAN_TX    true
-#define CHANNEL_HOP	2		//number of channels to hop by
+#define CHANNEL_HOP	5		//number of channels to hop by
 #define LEFT_SENSOR_HIGH 2
 #define RIGHT_SENSOR_HIGH 1
 //=========================== variables =======================================
@@ -86,7 +86,6 @@ typedef struct {
 
 app_vars_t app_vars;
 uint8_t txed;
-uint8_t rxpacket[LENGTH_PACKET];
 //=========================== prototypes ======================================
 
 void     cb_startFrame(PORT_TIMER_WIDTH timestamp);
@@ -150,9 +149,8 @@ void configure_pins(void){
 */
 int mote_main(void) {
 
-uint16_t passphrase[4] = {0x0C,0xCE,0xAC,0X5F};  // Mote1 ID
-//uint16_t passphrase[4] = {0xE6,0x6F,0x80,0XCE}; // Mote2 ID
-uint16_t re_txcount = 0x00;
+//uint16_t passphrase[4] = {0xAC,0xAC,0xA5,0XB1};  // Mote1 ID
+uint16_t passphrase[4] = {0xBD,0xBD,0xB6,0XC2}; // Mote2 ID
 tx_packet_count=0; //reset packet sent counter
 rx_packet_count=0; //reset packet rx counter
 //count = 0; //counter for verifying packet contents
@@ -164,9 +162,9 @@ left_state=0;
 right_state=0;
 uint32_t count_from_packet = 0;
 uint32_t last_pin_state = 0;
-int j=0;
-uint8_t i;
-
+	int j=0;
+   uint8_t i;
+   
    // clear local variables
    memset(&app_vars,0,sizeof(app_vars_t));
    
@@ -202,7 +200,7 @@ uint8_t i;
    //radio_rxEnable();
    if(RxMOTE){
       radio_rfOn();
-      radio_setFrequency(11 +(CHANNEL - 11 + CHANNEL_HOP * (MOTE_NUM-1)) % 16);
+      radio_setFrequency(CHANNEL+CHANNEL_HOP*(MOTE_NUM-1));
    }
    else if(MULTICHAN_TX){
       radio_setFrequency(CHANNEL);
@@ -219,7 +217,7 @@ uint8_t i;
       radio_rxEnable();
    } else{
 	//HWREG(RFCORE_XREG_RXENABLE) = 0; //disable rx
-	HWREG(RFCORE_XREG_FRMCTRL1)    = HWREG(RFCORE_XREG_FRMCTRL1) & 0xFFFFFFFE; //prevents stxon instruction from enabling rx, this is really important because it prevents tx motes from ever receiving anything
+	//HWREG(RFCORE_XREG_FRMCTRL1)    = HWREG(RFCORE_XREG_FRMCTRL1) & 0b110; //prevents stxon instruction from enabling rx, this is really important because it prevents tx motes from ever receiving anything
    }
    app_vars.state = APP_STATE_RX;
    
@@ -228,7 +226,7 @@ uint8_t i;
    //if(!RxMOTE){
      app_vars.flags |= APP_FLAG_TIMER;
   // }
-     tx_count = 0; //needed to reset tx system because of the above line otherwise you get an intial packet send
+     tx_count = 3; //needed to reset tx system because of the above line otherwise you get an intial packet send
    //}
 
 
@@ -275,7 +273,7 @@ uint8_t i;
             // end of frame
             
             switch (app_vars.state) {
-
+               
                case APP_STATE_RX:
                   
                   // done receiving a packet
@@ -283,7 +281,7 @@ uint8_t i;
                   
                   // get packet from radio
                   radio_getReceivedFrame(
-                     rxpacket,
+                     app_vars.packet,
                      &app_vars.packet_len,
                      sizeof(app_vars.packet),
                      &app_vars.rxpk_rssi,
@@ -302,7 +300,11 @@ uint8_t i;
                case APP_STATE_TX:
                   // done sending a packet
                   if(RxMOTE == false){
-
+		     tx_count++; //increment attempt counter
+//		     if((MULTICHAN_TX) && (tx_count<=1)){
+		     if((MULTICHAN_TX) && (tx_count<NUM_ATTEMPTS)){
+		        radio_setFrequency(CHANNEL+tx_count*CHANNEL_HOP);
+		     }
 		     //if number of attempts hasn't been reached, reset tx_timer flag to resend
 
 		     if((tx_count<NUM_ATTEMPTS) &&(GPIOPinRead(GPIO_A_BASE, GPIO_PIN_3)==0) ){
@@ -311,7 +313,6 @@ uint8_t i;
 
 		     }else{
                         tx_count=0;
-                        re_txcount =0x00;
                 		//reset sensor states
                 		left_state = 0;
                 		right_state = 0;
@@ -348,7 +349,7 @@ uint8_t i;
    		   app_vars.packet_len = sizeof(app_vars.packet);
    		   for (i=0;i<app_vars.packet_len;i++) {
 			   if(i<4){
-	  			 app_vars.packet[i]=re_txcount;
+	  			 app_vars.packet[i]=0;
 			   }
 			   else{
 				if(!RxMOTE){
@@ -359,7 +360,6 @@ uint8_t i;
 				}
 			   }
    		   }
-   		   re_txcount++; // added by SY (Nov. 21st)
 		
 		//sent packet contains the left and right sensor states
    		   /*
@@ -384,7 +384,7 @@ uint8_t i;
 
                // start transmitting packet
 				  /*Added by SY*/
-		 	 	  GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_1,GPIO_PIN_1);
+//		 	 	  GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_1,GPIO_PIN_1);
                   radio_loadPacket(app_vars.packet,app_vars.packet_len);
 
                   radio_txEnable();
@@ -392,15 +392,10 @@ uint8_t i;
 		//should i get rid of this if the mote is an rxmote? this could be a good idea 
 
                   radio_txNow();
-     		     tx_count++; //increment attempt counter
-     //		     if((MULTICHAN_TX) && (tx_count<=1)){
-     		     if((MULTICHAN_TX) && (tx_count<NUM_ATTEMPTS)){
-     		        radio_setFrequency(11+ (CHANNEL-11+tx_count*CHANNEL_HOP)%16);
-//     		        for(j=0;j<10000;j++);// add deley 11/12/18
-     		     }
+    
                   app_vars.state = APP_STATE_TX;
                   GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,0);
-                  //GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_1,0);
+
                }
            // }
             // clear flag
@@ -423,7 +418,7 @@ void cb_startFrame(PORT_TIMER_WIDTH timestamp) {
 
 void cb_endFrame(PORT_TIMER_WIDTH timestamp) {
 	  /*Added by SY*/
-	  GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_1,0);
+//	  GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_1,0);
    // set flag
    app_vars.flags |= APP_FLAG_END_FRAME;
    
@@ -477,7 +472,6 @@ void cb_button(void){
 //   leds_debug_off();
 //      leds_error_off();
    if(l_debounce_complete || r_debounce_complete ){
-	  tx_count=0;
       app_vars.flags |= APP_FLAG_TIMER;
       GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,GPIO_PIN_0);
    }
@@ -485,6 +479,3 @@ void cb_button(void){
 
 
 }
-
-
-
