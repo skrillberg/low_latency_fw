@@ -45,9 +45,7 @@ end of frame event), it will turn on its error LED.
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
 #define NUM_ATTEMPTS	3	       ///<number of times packet is resent, needs to match number of motes for multichan experiments
-#define RxMOTE		false
 #define MOTE_NUM	1	           // index that sets rx mote channel
-#define MULTICHAN_TX    true
 #define CHANNEL_HOP	5		//number of channels to hop by
 #define LEFT_SENSOR_HIGH 2
 #define RIGHT_SENSOR_HIGH 1
@@ -62,6 +60,9 @@ end of frame event), it will turn on its error LED.
 
 #define CLOCK_SPEED_MHZ 32.0f
 #define MAX_SAMPLES 200
+
+#define LEFT_LIM 102.0f
+#define RIGHT_LIM 90.0f
 
 //=========================== typedef =========================================
 
@@ -88,12 +89,11 @@ typedef enum {
 
 uint32_t tx_count; //count used to keep track of how many packet resends have happened
 uint32_t tx_packet_count; //counter for verifying packet contents
-uint32_t rx_packet_count;
+volatile uint32_t rx_packet_count;
 uint32_t debounce_complete; // used to debounce button press in interrupt handler
-uint32_t left_state;
-uint32_t right_state;
 
 bool moving_right;
+volatile bool transmitting;
 
 enum {
    APP_FLAG_START_FRAME = 0x01,
@@ -125,11 +125,9 @@ typedef struct {
 } app_vars_t;
 
 app_vars_t app_vars;
-uint8_t txed;
 //===========================localization======================================
 void precision_timers_init(void);
 void input_edge_timers_init(void);
-static void mattress_init(void);
 void pulse_handler_gpio_a(void);
 void pulse_handler_gpio_d(void);
 
@@ -146,8 +144,8 @@ static const uint32_t timer_cnt_16 = 0xFFFF;
 static const uint32_t timer_cnt_24 = 0xFFFFFF;
 
 /* Definition of global variables for mattress calibration. */
-float azimuth = -1;
-float elevation = -1;
+volatile float azimuth;
+volatile float elevation;
 
 static const float sweep_velocity = PI / SWEEP_PERIOD_US;
 
@@ -155,6 +153,11 @@ volatile float valid_angles[MAX_SAMPLES][2];
 volatile pulse_t pulses[PULSE_TRACK_COUNT];
 volatile uint8_t modular_ptr;
 volatile uint8_t pulse_count;
+volatile uint32_t samples;
+
+volatile uint32_t broken1;
+volatile uint32_t broken2;
+volatile uint32_t broken3;
 
 uint32_t test_count;
 
@@ -162,10 +165,6 @@ uint32_t test_count;
 
 void     cb_startFrame(PORT_TIMER_WIDTH timestamp);
 void     cb_endFrame(PORT_TIMER_WIDTH timestamp);
-void     cb_timer(void);
-void     cb_button(void);
-void	 cb_button2(void);
-void	 cb_count_rx(void);
 void	 configure_pins(void);
 
 void precision_timers_init(void){
@@ -274,6 +273,7 @@ location_t localize_mimsy(pulse_t *pulses_local) {
                 if (axis == ((int) valid_seq_a[ind]) || axis == ((int) valid_seq_b[ind])) {
                     sweep_axes_check += axis; // check for 1 horizontal, 1 vertical sweep
                 } else {
+                    broken1 += 1;
                     return loc;
                 }
             }
@@ -284,11 +284,15 @@ location_t localize_mimsy(pulse_t *pulses_local) {
             pulses_local[i].type = (int) Sync;
         } else { // neither
             pulses_local[i].type = -1;
+            broken2 += 1;
             return loc;
         }
     }
 
-    if (init_sync_index == PULSE_TRACK_COUNT || sweep_axes_check != 3) return loc;
+    if (init_sync_index == PULSE_TRACK_COUNT || sweep_axes_check != 3) {
+        broken3 += 1;
+        return loc;
+    }
 
     for (i = init_sync_index; i < PULSE_TRACK_COUNT-1; i++) {
         pulse_t curr_pulse = pulses_local[i];
@@ -317,16 +321,22 @@ location_t localize_mimsy(pulse_t *pulses_local) {
 
 void configure_pins(void){ // TODO: set to do lighthouse setup
     // localize and store
-    modular_ptr = 0; pulse_count = 0; test_count = 0;
+    modular_ptr = 0; pulse_count = 0; samples = 0; test_count = 0;
     // initialize edges
     unsigned short int i;
     for (i = 0; i < PULSE_TRACK_COUNT; i++) {
         pulses[i] = (pulse_t){.rise = 0, .fall = 0, .type = -1};
     }
 
+    // initialize angle array
+    uint32_t j;
+    for (j = 0; j < MAX_SAMPLES; j++) {
+        valid_angles[j][0] = 0; valid_angles[j][1] = 0;
+    }
+
     volatile uint32_t _i;
     //Delay to avoid pin floating problems
-    for (_i = 0xFFFF; _i != 0; _i--);
+    for(_i = 0xFFFF; _i != 0; _i--);
     
     precision_timers_init();
 }
@@ -339,20 +349,18 @@ void configure_pins(void){ // TODO: set to do lighthouse setup
 int mote_main(void) {
 
     bool moving_right = true;
+    bool transmitting = false;
 
-    //uint16_t passphrase[4] = {0xAC,0xAC,0xA5,0XB1};  // Mote1 ID
-    uint16_t passphrase[4] = {0xBD,0xBD,0xB6,0XC2}; // Mote2 ID
+    azimuth = ((float)(LEFT_LIM + RIGHT_LIM)) / 2;
+    broken1 = 0; broken2 = 0; broken3 = 0;
+
+    uint16_t passphrase[4] = {0xAC,0xAC,0xA5,0XB1};  // Mote1 ID
+    // uint16_t passphrase[4] = {0xBD,0xBD,0xB6,0XC2}; // Mote2 ID
     tx_packet_count=0; //reset packet sent counter
     rx_packet_count=0; //reset packet rx counter
-    //count = 0; //counter for verifying packet contents
     uint32_t byte_masks[4]={0xff000000,0x00ff0000,0x0000ff00,0x000000ff}; //used to access each byte of counter
-    tx_count =0; //count used to keep track of how many packet resends have happened
-    txed = 0;
+    tx_count = 0; //count used to keep track of how many packet resends have happened
     uint32_t packet_valid;
-    left_state=0;
-    right_state=0;
-    uint32_t count_from_packet = 0;
-    uint32_t last_pin_state = 0;
 	int j=0;
     uint8_t i;
 
@@ -369,226 +377,137 @@ int mote_main(void) {
     // prepare packet. This loads the 32bit counter into the packet
     app_vars.packet_len = sizeof(app_vars.packet);
     for (i=0;i<app_vars.packet_len;i++) {
-    if(i<4){
-       app_vars.packet[i]=0;
-    } else {
-	    if(!RxMOTE){
-      	   		app_vars.packet[i] = passphrase[i-4];
-	    } else {
-		    app_vars.packet[i] = 0xAB;
-	    }
-    }
+        if(i<4){
+            app_vars.packet[i]=0;
+        } else {
+            app_vars.packet[i] = passphrase[i-4];
+        }
     }
 
-    // start bsp timer
-    // sctimer_set_callback(cb_timer);
-    // sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
-    // sctimer_enable();
-
-    if(MULTICHAN_TX){
-        radio_setFrequency(CHANNEL);
-    } else {
-        radio_setFrequency(TX_CHANNEL);
-    }
+    radio_setFrequency(CHANNEL); // multichannel
 
     // configure localization interrupt timing scheme
     configure_pins();
 
 
-    // switch in RX by default (only if rxmote?)
-    if(RxMOTE){
-        radio_rxEnable();
-    } else{
-        //HWREG(RFCORE_XREG_RXENABLE) = 0; //disable rx
-        //HWREG(RFCORE_XREG_FRMCTRL1)    = HWREG(RFCORE_XREG_FRMCTRL1) & 0b110; //prevents stxon instruction from enabling rx, this is really important because it prevents tx motes from ever receiving anything
-    }
+    // TODO: what's up with this???
+    // HWREG(RFCORE_XREG_RXENABLE) = 0; //disable rx
+    // HWREG(RFCORE_XREG_FRMCTRL1)    = HWREG(RFCORE_XREG_FRMCTRL1) & 0b110; //prevents stxon instruction from enabling rx, this is really important because it prevents tx motes from ever receiving anything
     app_vars.state = APP_STATE_RX;
    
     // start by a transmit
     app_vars.flags |= APP_FLAG_TIMER;
     tx_count = 3; //needed to reset tx system because of the above line otherwise you get an intial packet send
 
-    while (1) {
-        // handle and clear every flag
-        while (app_vars.flags) {
-         
+    while (true) {
+        //==== APP_FLAG_START_FRAME (TX or RX)
+        if (app_vars.flags & APP_FLAG_START_FRAME) {
+            // start of frame
 
-            //==== APP_FLAG_START_FRAME (TX or RX)
+            switch (app_vars.state) {
+            case APP_STATE_RX:
+                // started receiving a packet
 
-            if (app_vars.flags & APP_FLAG_START_FRAME) {
-                // start of frame
+                // led
+                leds_error_on();
+                break;
+            case APP_STATE_TX:
+                // started sending a packet
 
-                switch (app_vars.state) {
-                case APP_STATE_RX:
-                    // started receiving a packet
-                    // led
-                    leds_error_on();
-                    break;
-                case APP_STATE_TX:
-                    // started sending a packet
-                    // led
-                    leds_sync_on();
-                    break;
-                }
-            
-                // clear flag
-                app_vars.flags &= ~APP_FLAG_START_FRAME;
+                // led
+                leds_sync_on();
+                break;
             }
-         
-         
-            //==== APP_FLAG_END_FRAME (TX or RX)
+        
+            // clear flag
+            app_vars.flags &= ~APP_FLAG_START_FRAME;
+        }
+     
+        //==== APP_FLAG_END_FRAME (TX or RX)
+        if (app_vars.flags & APP_FLAG_END_FRAME) {
+            // end of frame
+            switch (app_vars.state) {
+            case APP_STATE_RX:
+                // done receiving a packet
+                app_vars.packet_len = sizeof(app_vars.packet);
 
-            if (app_vars.flags & APP_FLAG_END_FRAME) {
-                // end of frame
-                switch (app_vars.state) {
-                case APP_STATE_RX:
-                    // done receiving a packet
-                    app_vars.packet_len = sizeof(app_vars.packet);
+                // get packet from radio
+                radio_getReceivedFrame(
+                    app_vars.packet,
+                    &app_vars.packet_len,
+                    sizeof(app_vars.packet),
+                    &app_vars.rxpk_rssi,
+                    &app_vars.rxpk_lqi,
+                    &app_vars.rxpk_crc
+                );
 
-                    // get packet from radio
-                    radio_getReceivedFrame(
-                        app_vars.packet,
-                        &app_vars.packet_len,
-                        sizeof(app_vars.packet),
-                        &app_vars.rxpk_rssi,
-                        &app_vars.rxpk_lqi,
-                        &app_vars.rxpk_crc
-                    );
-
-                    // led
-                    leds_error_off();
-                    break;
-                case APP_STATE_TX:
-                    // done sending a packet
-                    if(!RxMOTE){
-                        tx_count++; //increment attempt counter
-                        if((MULTICHAN_TX) && (tx_count<NUM_ATTEMPTS)){
-                            radio_setFrequency(CHANNEL+tx_count*CHANNEL_HOP);
-                        }
-                        // if number of attempts hasn't been reached, reset tx_timer flag to resend
-
-                        if((tx_count<NUM_ATTEMPTS) &&(GPIOPinRead(GPIO_A_BASE, GPIO_PIN_3)==0)){
-                            app_vars.flags |= APP_FLAG_TIMER;
-                        } else {
-                            tx_count=0;
-                            //reset sensor states
-                            left_state = 0;
-                            right_state = 0;
-                        }
+                // led
+                leds_error_off();
+                break;
+            case APP_STATE_TX:
+                // done sending a packet
+                if(transmitting){
+                    tx_count++; //increment attempt counter
+                    // if number of attempts hasn't been reached, reset tx_timer flag to resend
+                    if((tx_count<NUM_ATTEMPTS)){
+                        radio_setFrequency(CHANNEL+tx_count*CHANNEL_HOP); // multichannel
+                        app_vars.flags |= APP_FLAG_TIMER;
+                    } else { // done transmitting
+                        tx_count = 0; transmitting = false;
+                        // change motion state
+                        moving_right = !moving_right;
+                        // IntEnable(gptmFallingEdgeInt);
+                        // tx_packet_count += 1;
+                        // NOTE: incorporate Kalman velocity direction into this? prolly overkill bc shouldn't differ o/w undefined behavior
                     }
-                    // switch to RX mode (only if rxmote?)
-                    if(RxMOTE){
-                        radio_rxEnable();
-                    }
-                    app_vars.state = APP_STATE_RX;
-                    break;
                 }
-                // clear flag
-                app_vars.flags &= ~APP_FLAG_END_FRAME;
+                app_vars.state = APP_STATE_RX;
+                break;
             }
-         
-        // check if fresh pulse data is available
-        if (pulse_count >= 5) {
-            IntMasterDisable(); // temporarily disable interrupts
-
-            // get pose
-            pulse_t pulses_local[PULSE_TRACK_COUNT];
-            uint8_t ptr = modular_ptr;
-
-            unsigned short int i;
-            for (i = ptr; i < ptr + PULSE_TRACK_COUNT; i++) {
-                pulses_local[i-ptr].rise = pulses[i%PULSE_TRACK_COUNT].rise;
-                pulses_local[i-ptr].fall = pulses[i%PULSE_TRACK_COUNT].fall;
-                pulses_local[i-ptr].type = pulses[i%PULSE_TRACK_COUNT].type;
-            }
-
-            pulse_count = 0;
-            IntMasterEnable(); // re-enable interrupts
-
-            // recover azimuth and elevation
-            location_t loc = localize_mimsy(pulses_local);
-            if (!loc.valid) { test_count += 1; continue; }
-
-            valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = loc.theta;
-            azimuth = loc.phi * 180/PI; elevation = loc.theta * 180/PI;
+            // clear flag
+            app_vars.flags &= ~APP_FLAG_END_FRAME;
         }
 
-        if ((!moving_right && azimuth >= 102.0) || (moving_right && azimuth <= 90.0)) {
-            if(RxMOTE==false && MULTICHAN_TX){
-               radio_setFrequency(CHANNEL);
+        //==== APP_FLAG_TIMER
+        if (app_vars.flags & APP_FLAG_TIMER) {
+            // should transmit pose
+            if (app_vars.state==APP_STATE_RX) {
+
+                // stop listening (this doesn't do much)
+                radio_rfOff();
+
+                // prepare packet. This loads the 32bit counter into the packet
+                app_vars.packet_len = sizeof(app_vars.packet);
+                for (i=0;i<app_vars.packet_len;i++) {
+                    if (i<4) {
+                        app_vars.packet[i]=0;
+                    } else {
+                        app_vars.packet[i] = passphrase[i-4];
+                    }
+                }
+
+                // sent packet contains the left and right sensor states
+                if(moving_right){
+                    app_vars.packet[0] = 0xFF;
+                }else{
+                    app_vars.packet[0] = 0xAA;
+                }
+
+                tx_packet_count += 1;
+
+                // start transmitting packet
+                radio_loadPacket(app_vars.packet,app_vars.packet_len);
+                radio_txEnable();
+                radio_txNow();
+
+                app_vars.state = APP_STATE_TX;
+                GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,0);
+
             }
-            app_vars.flags |= APP_FLAG_TIMER;
-            GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,GPIO_PIN_0);
-        }
-         //==== APP_FLAG_TIMER
-         
-         if (app_vars.flags & APP_FLAG_TIMER) {
-            // timer fired
-           
-               if (app_vars.state==APP_STATE_RX) {
-
-                  // stop listening (this doesn't do much)
-                  radio_rfOff();
-
-		   // prepare packet. This loads the 32bit counter into the packet
-   		   app_vars.packet_len = sizeof(app_vars.packet);
-   		   for (i=0;i<app_vars.packet_len;i++) {
-			   if(i<4){
-	  			 app_vars.packet[i]=0;
-			   }
-			   else{
-				if(!RxMOTE){
-      	   		   		app_vars.packet[i] = passphrase[i-4];
-				}
-				else{
-					app_vars.packet[i] = 0xAB;
-				}
-			   }
-   		   }
-		
-		//sent packet contains the left and right sensor states
-   		   /*
-		if(left_state && right_state){
-			app_vars.packet[0] = 3;
-		}else if(left_state && (!right_state)){
-			app_vars.packet[0] = 2;
-		}else if ((!left_state) && right_state){
-
-			app_vars.packet[0] = 1;
-		}else{
-
-			app_vars.packet[0] = 0;
-		}*/
-		//app_vars.packet[0] = (left_state<<1) |(right_state);
-		if(moving_right){
-			app_vars.packet[0] = 0xFF;
-		}else{
-			app_vars.packet[0] = 0xAA;
-		}
-		
-
-               // start transmitting packet
-				  /*Added by SY*/
-//		 	 	  GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_1,GPIO_PIN_1);
-                  radio_loadPacket(app_vars.packet,app_vars.packet_len);
-
-                  radio_txEnable();
-
-		//should i get rid of this if the mote is an rxmote? this could be a good idea 
-
-                  radio_txNow();
-    
-                  app_vars.state = APP_STATE_TX;
-                  GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,0);
-
-               }
-           // }
             // clear flag
             app_vars.flags &= ~APP_FLAG_TIMER;
-            moving_right = !moving_right;
-         }
-      }
-   }
+        }
+    }
 }
 
 //=========================== callbacks =======================================
@@ -600,6 +519,39 @@ void pulse_handler_gpio_a(void) {
     modular_ptr++; if (modular_ptr == 5) modular_ptr = 0;
 
     pulse_count += 1;
+
+    // check if fresh pulse data is available
+    if (pulse_count >= 5) {
+        // get pose
+        pulse_t pulses_local[PULSE_TRACK_COUNT];
+        uint8_t ptr = modular_ptr;
+
+        unsigned short int i;
+        for (i = ptr; i < ptr + PULSE_TRACK_COUNT; i++) {
+            pulses_local[i-ptr].rise = pulses[i%PULSE_TRACK_COUNT].rise;
+            pulses_local[i-ptr].fall = pulses[i%PULSE_TRACK_COUNT].fall;
+            pulses_local[i-ptr].type = pulses[i%PULSE_TRACK_COUNT].type;
+        }
+
+        pulse_count = 0; // TODO: maybe only do this if pulses are valid???
+        // recover azimuth and elevation
+        location_t loc = localize_mimsy(pulses_local);
+        if (!loc.valid) { test_count += 1; return; }
+
+        valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = loc.theta;
+        azimuth = loc.phi * 180/PI; elevation = loc.theta * 180/PI;
+
+        samples += 1; if (samples == MAX_SAMPLES) samples = 0;
+
+        if ((!moving_right && (azimuth >= LEFT_LIM)) || (moving_right && (azimuth <= RIGHT_LIM))) {
+            radio_setFrequency(CHANNEL); // multichannel
+            app_vars.flags |= APP_FLAG_TIMER;
+            GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,GPIO_PIN_0);
+            transmitting = true;
+            rx_packet_count += 1;
+            // IntDisable(gptmFallingEdgeInt); // TODO: may not need this!!
+        }
+    }
 }
 
 void cb_startFrame(PORT_TIMER_WIDTH timestamp) {
@@ -611,65 +563,9 @@ void cb_startFrame(PORT_TIMER_WIDTH timestamp) {
 }
 
 void cb_endFrame(PORT_TIMER_WIDTH timestamp) {
-	  /*Added by SY*/
-//	  GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_1,0);
    // set flag
    app_vars.flags |= APP_FLAG_END_FRAME;
    
    // update debug stats
    app_dbg.num_endFrame++;
-}
-
-
-
-void cb_count_rx(void){
-rx_packet_count++;
-   GPIOPinIntClear(GPIO_A_BASE, GPIO_PIN_4);
-}
-void cb_button(void){
-   uint32_t k;
-   uint32_t int_status;
-   uint32_t r_debounce_complete;
-   uint32_t l_debounce_complete;
-   left_state=0;
-   right_state = 0;
-   int_status = GPIOPinIntStatus(GPIO_A_BASE,true);
-  // app_vars.flags |= APP_FLAG_TIMER;
-   //count++; //increment counter 
-   GPIOPinIntClear(GPIO_A_BASE, GPIO_PIN_2);
-   GPIOPinIntClear(GPIO_A_BASE, GPIO_PIN_5);
-   //leds_sync_on();
-   if(RxMOTE==false && MULTICHAN_TX){
-      radio_setFrequency(CHANNEL);
-   }
-   l_debounce_complete = 0;
-   r_debounce_complete = 0;
-  // for( k =0;k<10;k++){
-  // }
- //  if(GPIOPinRead(GPIO_A_BASE, GPIO_PIN_2)!=0){
-      l_debounce_complete=1;
-   //}
-  // if(GPIOPinRead(GPIO_A_BASE, GPIO_PIN_5)!=0){
-      r_debounce_complete=1;
-  // }
-
-   if(int_status & GPIO_PIN_2){
-//      leds_error_on();
-      left_state = 1;
-   }
-   if(int_status & GPIO_PIN_5){
-//      leds_debug_on();
-      right_state = 1;
-   }
-//   for( k =0;k<1000;k++){
-//   }
-//   leds_debug_off();
-//      leds_error_off();
-   if(l_debounce_complete || r_debounce_complete ){
-      app_vars.flags |= APP_FLAG_TIMER;
-      GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,GPIO_PIN_0);
-   }
-
-
-
 }

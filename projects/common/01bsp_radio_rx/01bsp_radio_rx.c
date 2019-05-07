@@ -182,38 +182,20 @@ int mote_main(void) {
       packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xAC) && (app_vars.rxpk_buf[5] == 0xAC)  && (app_vars.rxpk_buf[6] == 0xA5) && (app_vars.rxpk_buf[7] == 0xB1));
 //	  packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xBD) && (app_vars.rxpk_buf[5] == 0xBD)  && (app_vars.rxpk_buf[6] == 0xB6) && (app_vars.rxpk_buf[7] == 0xC2));
 	  if(packet_valid){
-/*
-		if((app_vars.rxpk_buf[0] == 3) || (app_vars.rxpk_buf[0] ==1)){
-			leds_sync_on();
-			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
-			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
-			  for(j=0;j<50000;j++){
-			}
-			//set right output pin high 
-		}
-		if((app_vars.rxpk_buf[0] == 3) || (app_vars.rxpk_buf[0] == 2)){
-			leds_debug_on();
-			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,GPIO_PIN_1);
-			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
-			  for(j=0;j<50000;j++){
-			}
-			*/
-
 		//set left output pin high
 	  if((app_vars.rxpk_buf[0] == 0xFF)){
 				leds_sync_on();
 				GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
 				GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
-//				for(j=0;j<50000;j++){
 				for(j=0;j<10000;j++){
 				}
 	  }
 
+        //set right output pin high
 		if((app_vars.rxpk_buf[0] == 0xAA)){
 			leds_debug_on();
 			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,GPIO_PIN_1);
 			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
-//				for(j=0;j<50000;j++){
 			  for(j=0;j<10000;j++){
 			}
 
