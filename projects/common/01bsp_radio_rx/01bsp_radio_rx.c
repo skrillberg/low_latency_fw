@@ -77,7 +77,7 @@ len=17  num=84  rssi=-81  lqi=108 crc=1
 //=========================== defines =========================================
 
 #define LENGTH_PACKET        8+LENGTH_CRC ///< maximum length is 127 bytes
-#define CHANNEL              16           ///< 11 = 2.405GHz
+#define CHANNEL              21           ///< 11 = 2.405GHz
 #define LENGTH_SERIAL_FRAME  8              ///< length of the serial frame
 
 //=========================== variables =======================================
@@ -187,7 +187,7 @@ int mote_main(void) {
 				leds_sync_on();
 				GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
 				GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
-				for(j=0;j<10000;j++){
+				for(j=0;j<50000;j++){
 				}
 	  }
 
@@ -196,7 +196,7 @@ int mote_main(void) {
 			leds_debug_on();
 			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,GPIO_PIN_1);
 			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
-			  for(j=0;j<10000;j++){
+			  for(j=0;j<50000;j++){
 			}
 
 		}

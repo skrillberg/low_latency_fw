@@ -348,8 +348,8 @@ void configure_pins(void){ // TODO: set to do lighthouse setup
 */
 int mote_main(void) {
 
-    bool moving_right = true;
-    bool transmitting = false;
+    moving_right = true;
+    transmitting = false;
 
     azimuth = ((float)(LEFT_LIM + RIGHT_LIM)) / 2;
     broken1 = 0; broken2 = 0; broken3 = 0;
@@ -384,7 +384,9 @@ int mote_main(void) {
         }
     }
 
+    radio_rfOn();
     radio_setFrequency(CHANNEL); // multichannel
+    radio_rfOff();
 
     // configure localization interrupt timing scheme
     configure_pins();
@@ -393,31 +395,17 @@ int mote_main(void) {
     // TODO: what's up with this???
     // HWREG(RFCORE_XREG_RXENABLE) = 0; //disable rx
     // HWREG(RFCORE_XREG_FRMCTRL1)    = HWREG(RFCORE_XREG_FRMCTRL1) & 0b110; //prevents stxon instruction from enabling rx, this is really important because it prevents tx motes from ever receiving anything
-    app_vars.state = APP_STATE_RX;
    
-    // start by a transmit
-    app_vars.flags |= APP_FLAG_TIMER;
-    tx_count = 3; //needed to reset tx system because of the above line otherwise you get an intial packet send
+    app_vars.flags &= ~APP_FLAG_TIMER; app_vars.flags &= ~APP_FLAG_START_FRAME; app_vars.flags &= ~APP_FLAG_END_FRAME;
 
     while (true) {
         //==== APP_FLAG_START_FRAME (TX or RX)
         if (app_vars.flags & APP_FLAG_START_FRAME) {
             // start of frame
+            // started sending a packet
 
-            switch (app_vars.state) {
-            case APP_STATE_RX:
-                // started receiving a packet
-
-                // led
-                leds_error_on();
-                break;
-            case APP_STATE_TX:
-                // started sending a packet
-
-                // led
-                leds_sync_on();
-                break;
-            }
+            // led
+            leds_sync_on();
         
             // clear flag
             app_vars.flags &= ~APP_FLAG_START_FRAME;
@@ -426,43 +414,23 @@ int mote_main(void) {
         //==== APP_FLAG_END_FRAME (TX or RX)
         if (app_vars.flags & APP_FLAG_END_FRAME) {
             // end of frame
-            switch (app_vars.state) {
-            case APP_STATE_RX:
-                // done receiving a packet
-                app_vars.packet_len = sizeof(app_vars.packet);
-
-                // get packet from radio
-                radio_getReceivedFrame(
-                    app_vars.packet,
-                    &app_vars.packet_len,
-                    sizeof(app_vars.packet),
-                    &app_vars.rxpk_rssi,
-                    &app_vars.rxpk_lqi,
-                    &app_vars.rxpk_crc
-                );
-
-                // led
-                leds_error_off();
-                break;
-            case APP_STATE_TX:
-                // done sending a packet
-                if(transmitting){
-                    tx_count++; //increment attempt counter
-                    // if number of attempts hasn't been reached, reset tx_timer flag to resend
-                    if((tx_count<NUM_ATTEMPTS)){
-                        radio_setFrequency(CHANNEL+tx_count*CHANNEL_HOP); // multichannel
-                        app_vars.flags |= APP_FLAG_TIMER;
-                    } else { // done transmitting
-                        tx_count = 0; transmitting = false;
-                        // change motion state
-                        moving_right = !moving_right;
-                        // IntEnable(gptmFallingEdgeInt);
-                        // tx_packet_count += 1;
-                        // NOTE: incorporate Kalman velocity direction into this? prolly overkill bc shouldn't differ o/w undefined behavior
-                    }
+            // done sending a packet
+            if(transmitting){
+                tx_count++; //increment attempt counter
+                // if number of attempts hasn't been reached, reset tx_timer flag to resend
+                if((tx_count<NUM_ATTEMPTS)){
+                    radio_rfOn();
+                    radio_setFrequency(CHANNEL+tx_count*CHANNEL_HOP); // multichannel
+                    radio_rfOff();
+                    app_vars.flags |= APP_FLAG_TIMER;
+                } else { // done transmitting
+                    tx_count = 0; transmitting = false;
+                    // change motion state
+                    moving_right = !moving_right;
+                    IntEnable(gptmFallingEdgeInt);
+                    // tx_packet_count += 1;
+                    // NOTE: incorporate Kalman velocity direction into this? prolly overkill bc shouldn't differ o/w undefined behavior
                 }
-                app_vars.state = APP_STATE_RX;
-                break;
             }
             // clear flag
             app_vars.flags &= ~APP_FLAG_END_FRAME;
@@ -471,39 +439,40 @@ int mote_main(void) {
         //==== APP_FLAG_TIMER
         if (app_vars.flags & APP_FLAG_TIMER) {
             // should transmit pose
-            if (app_vars.state==APP_STATE_RX) {
+            IntDisable(gptmFallingEdgeInt);
 
-                // stop listening (this doesn't do much)
+            if (tx_count == 0) {
+                radio_rfOn();
+                radio_setFrequency(CHANNEL); // multichannel
                 radio_rfOff();
-
-                // prepare packet. This loads the 32bit counter into the packet
-                app_vars.packet_len = sizeof(app_vars.packet);
-                for (i=0;i<app_vars.packet_len;i++) {
-                    if (i<4) {
-                        app_vars.packet[i]=0;
-                    } else {
-                        app_vars.packet[i] = passphrase[i-4];
-                    }
-                }
-
-                // sent packet contains the left and right sensor states
-                if(moving_right){
-                    app_vars.packet[0] = 0xFF;
-                }else{
-                    app_vars.packet[0] = 0xAA;
-                }
-
-                tx_packet_count += 1;
-
-                // start transmitting packet
-                radio_loadPacket(app_vars.packet,app_vars.packet_len);
-                radio_txEnable();
-                radio_txNow();
-
-                app_vars.state = APP_STATE_TX;
-                GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,0);
-
             }
+
+            // prepare packet. This loads the 32bit counter into the packet
+            app_vars.packet_len = sizeof(app_vars.packet);
+            for (i=0;i<app_vars.packet_len;i++) {
+                if (i<4) {
+                    app_vars.packet[i]=0;
+                } else {
+                    app_vars.packet[i] = passphrase[i-4];
+                }
+            }
+
+            // sent packet contains the left and right sensor states
+            if(moving_right){
+                app_vars.packet[0] = 0xFF;
+            }else{
+                app_vars.packet[0] = 0xAA;
+            }
+
+            tx_packet_count += 1;
+
+            // start transmitting packet
+            radio_loadPacket(app_vars.packet,app_vars.packet_len);
+            radio_txEnable();
+            radio_txNow();
+
+            // GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,0);
+
             // clear flag
             app_vars.flags &= ~APP_FLAG_TIMER;
         }
@@ -543,13 +512,11 @@ void pulse_handler_gpio_a(void) {
 
         samples += 1; if (samples == MAX_SAMPLES) samples = 0;
 
-        if ((!moving_right && (azimuth >= LEFT_LIM)) || (moving_right && (azimuth <= RIGHT_LIM))) {
-            radio_setFrequency(CHANNEL); // multichannel
-            app_vars.flags |= APP_FLAG_TIMER;
-            GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,GPIO_PIN_0);
+        if ((moving_right && (azimuth <= 90.0)) || (!moving_right && (azimuth >= 102.0))) {
             transmitting = true;
+            app_vars.flags |= APP_FLAG_TIMER;
+            // GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,GPIO_PIN_0);
             rx_packet_count += 1;
-            // IntDisable(gptmFallingEdgeInt); // TODO: may not need this!!
         }
     }
 }
