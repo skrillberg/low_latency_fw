@@ -59,7 +59,7 @@ end of frame event), it will turn on its error LED.
 #define SWEEP_PERIOD_US 8333.333333f
 
 #define CLOCK_SPEED_MHZ 32.0f
-#define MAX_SAMPLES 200
+#define MAX_SAMPLES 1500
 
 #define LEFT_LIM 102.0f
 #define RIGHT_LIM 90.0f
@@ -94,6 +94,7 @@ uint32_t debounce_complete; // used to debounce button press in interrupt handle
 
 bool moving_right;
 volatile bool transmitting;
+volatile bool finished;
 
 enum {
    APP_FLAG_START_FRAME = 0x01,
@@ -350,6 +351,7 @@ int mote_main(void) {
 
     moving_right = true;
     transmitting = false;
+    finished = false;
 
     azimuth = ((float)(LEFT_LIM + RIGHT_LIM)) / 2;
     broken1 = 0; broken2 = 0; broken3 = 0;
@@ -369,6 +371,14 @@ int mote_main(void) {
 
     // initialize board
     board_init();
+    configure_pins();
+
+    while (!finished) {
+        // wait for new position update
+        // write position to array or to UART
+    }
+
+    return;
 
     // add callback functions radio
     radio_setStartFrameCb(cb_startFrame);
@@ -510,14 +520,7 @@ void pulse_handler_gpio_a(void) {
         valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = loc.theta;
         azimuth = loc.phi * 180/PI; elevation = loc.theta * 180/PI;
 
-        samples += 1; if (samples == MAX_SAMPLES) samples = 0;
-
-        if ((moving_right && (azimuth <= 90.0)) || (!moving_right && (azimuth >= 102.0))) {
-            transmitting = true;
-            app_vars.flags |= APP_FLAG_TIMER;
-            // GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,GPIO_PIN_0);
-            rx_packet_count += 1;
-        }
+        samples += 1; if (samples == MAX_SAMPLES) { finished = true; }
     }
 }
 
