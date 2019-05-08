@@ -59,7 +59,7 @@ end of frame event), it will turn on its error LED.
 #define SWEEP_PERIOD_US 8333.333333f
 
 #define CLOCK_SPEED_MHZ 32.0f
-#define MAX_SAMPLES 1500
+#define MAX_SAMPLES 1000
 
 #define LEFT_LIM 102.0f
 #define RIGHT_LIM 90.0f
