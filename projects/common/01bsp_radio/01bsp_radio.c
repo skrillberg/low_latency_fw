@@ -22,6 +22,7 @@ end of frame event), it will turn on its error LED.
 #include "radio.h"
 #include "leds.h"
 #include "sctimer.h"
+#include "kalman.h"
 #include <headers/hw_memmap.h>
 #include <headers/hw_ioc.h>
 #include <headers/hw_ssi.h>
