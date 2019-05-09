@@ -22,6 +22,9 @@ end of frame event), it will turn on its error LED.
 #include "radio.h"
 #include "leds.h"
 #include "sctimer.h"
+#include "i2c.h"
+#include "mpu.h"
+#include "inv_mpu.h"
 #include <headers/hw_memmap.h>
 #include <headers/hw_ioc.h>
 #include <headers/hw_ssi.h>
@@ -30,6 +33,7 @@ end of frame event), it will turn on its error LED.
 #include <headers/hw_rfcore_sfr.h>
 #include <headers/hw_rfcore_sfr.h>
 #include <headers/hw_rfcore_xreg.h>
+#include <headers/MPU9250_RegisterMap.h>
 #include <source/interrupt.h>
 #include <source/ioc.h>
 #include <source/gpio.h>
@@ -41,7 +45,7 @@ end of frame event), it will turn on its error LED.
 #define LENGTH_PACKET   8+LENGTH_CRC ///< maximum length is 127 bytes
 #define CHANNEL         16             ///< 11=2.405GHz
 #define TX_CHANNEL	16	       /// tx channel of individual mote
-#define TIMER_PERIOD    0xffff         ///< 0xffff = 2s@32kHz
+#define TIMER_PERIOD    0xff         ///< 0xff = 125 Hz
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
 #define NUM_ATTEMPTS	3	       ///<number of times packet is resent, needs to match number of motes for multichan experiments
@@ -59,10 +63,13 @@ end of frame event), it will turn on its error LED.
 #define SWEEP_PERIOD_US 8333.333333f
 
 #define CLOCK_SPEED_MHZ 32.0f
-#define MAX_SAMPLES 1000
+#define MAX_SAMPLES 300
 
 #define LEFT_LIM 102.0f
 #define RIGHT_LIM 90.0f
+
+#define IMU_ADDRESS 0x69
+#define LOW_POWER 0
 
 //=========================== typedef =========================================
 
@@ -150,6 +157,10 @@ volatile float elevation;
 
 static const float sweep_velocity = PI / SWEEP_PERIOD_US;
 
+float imu_data[MAX_SAMPLES][3];
+uint8_t imu_samples;
+bool imu_ready;
+
 volatile float valid_angles[MAX_SAMPLES][2];
 volatile pulse_t pulses[PULSE_TRACK_COUNT];
 volatile uint8_t modular_ptr;
@@ -166,7 +177,61 @@ uint32_t test_count;
 
 void     cb_startFrame(PORT_TIMER_WIDTH timestamp);
 void     cb_endFrame(PORT_TIMER_WIDTH timestamp);
+void     cb_timer(void);
 void	 configure_pins(void);
+
+void imu_init(void) {
+    // initialize IMU
+    imu_ready = false;
+    imu_samples = 0;
+
+    // start bsp timer
+    sctimer_set_callback(cb_timer);
+    sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
+    sctimer_enable();
+
+    i2c_init();
+    mpu_set_sensors(INV_XYZ_ACCEL); // turn on sensors
+    mpu_set_accel_fsr(16); // set fsr for accel
+    mpu_set_sample_rate(500); // set sampling rate to 500Hz
+}
+
+void get_scalar_accel(void) {//(uint16_t *accel) { // FIXME: put back when done debugging, is there a way to have this service an interrupt?
+    uint8_t address = IMU_ADDRESS;
+    uint8_t readbyte;  
+    uint8_t *byteptr = &readbyte;
+
+    uint16_t ax;
+    uint16_t ay;
+    uint16_t az;
+
+    if (imu_samples >= MAX_SAMPLES) { return; }
+
+    // Accel X
+    i2c_read_register(address, MPU9250_ACCEL_XOUT_H, byteptr);
+    ax = ((uint16_t) readbyte) << 8;
+
+    i2c_read_register(address, MPU9250_ACCEL_XOUT_L, byteptr);
+    ax = ((uint16_t) readbyte) | ax;
+
+    // Accel Y
+    i2c_read_register(address, MPU9250_ACCEL_YOUT_H, byteptr);
+    ay = ((uint16_t) readbyte) << 8;
+
+    i2c_read_register(address, MPU9250_ACCEL_YOUT_L, byteptr);
+    ay = ((uint16_t) readbyte) | ay;
+
+    // Accel Z
+    i2c_read_register(address, MPU9250_ACCEL_ZOUT_H, byteptr);
+    az = ((uint16_t) readbyte) << 8;
+
+    i2c_read_register(address, MPU9250_ACCEL_ZOUT_L, byteptr);
+    az = ((uint16_t) readbyte) | az;
+
+    // accel[0] = ax; accel[1] = ay; accel[2] = az;
+    imu_data[imu_samples][0] = ((float) ax) / 16000.0; imu_data[imu_samples][1] = ((float) ay) / 16000.0; imu_data[imu_samples][2] = ((float) az) / 16000.0;
+    imu_samples += 1;
+}
 
 void precision_timers_init(void){
     // SysCtrlPeripheralEnable(SYS_CTRL_PERIPH_GPT0); // enables timer0 module
@@ -212,7 +277,7 @@ void input_edge_timers_init(void) {
 
     IntMasterEnable();
 
-    TimerEnable(gptmEdgeTimerBase,GPTIMER_BOTH);
+    TimerEnable(gptmEdgeTimerBase, GPTIMER_BOTH);
 
     TimerSynchronize(GPTIMER0_BASE, GPTIMER_3A_SYNC | GPTIMER_3B_SYNC); // for 2 diodes, sync logical or of GPTIMER_2A_SYNC and these two with GPTIMER0_BASE as base??? check if we get same functionality hmmmm
 }
@@ -303,11 +368,11 @@ location_t localize_mimsy(pulse_t *pulses_local) {
             case ((int) Sync):
                 break;
             case ((int) Horiz):
-                loc.phi = get_period_us(curr_pulse.fall, next_pulse.rise) * sweep_velocity;
+                loc.phi = get_period_us(curr_pulse.rise, next_pulse.rise) * sweep_velocity;
                 loc.r_horiz = distance_fit_horiz(get_period_us(next_pulse.rise, next_pulse.fall));
                 break;
             case ((int) Vert):
-                loc.theta = get_period_us(curr_pulse.fall, next_pulse.rise) * sweep_velocity;
+                loc.theta = get_period_us(curr_pulse.rise, next_pulse.rise) * sweep_velocity;
                 loc.r_vert = distance_fit_vert(get_period_us(next_pulse.rise, next_pulse.fall));
                 break;
             default:
@@ -371,11 +436,15 @@ int mote_main(void) {
 
     // initialize board
     board_init();
+    imu_init();
     configure_pins();
 
     while (!finished) {
-        // wait for new position update
-        // write position to array or to UART
+        while (!imu_ready) {
+            // wait for new IMU update
+        }
+        get_scalar_accel(); // get acceleration until FIFO is empty?
+        imu_ready = false;
     }
 
     return;
@@ -538,4 +607,11 @@ void cb_endFrame(PORT_TIMER_WIDTH timestamp) {
    
    // update debug stats
    app_dbg.num_endFrame++;
+}
+
+void cb_timer(void) {
+   // set flag
+   imu_ready = true;
+   
+   sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
 }
