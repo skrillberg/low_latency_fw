@@ -1,7 +1,7 @@
 #ifndef __KALMAN_H
 #define __KALMAN_H
 
-/** Repurposed from https://github.com/simondlevy/TinyEKF
+/** Adapted from https://github.com/simondlevy/TinyEKF
 
 \brief An Extended Kalman Filter for low-latency, high-reliability localization, communication, and control.
 
@@ -11,8 +11,8 @@
 
 //=========================== define ==========================================
 
-#define LH_RAD_VAR 0.01f
-#define IMU_ACCEL_VAR 0.1f
+#define LH_RAD_VAR 0.00000001f
+#define ACCEL_G_VAR 0.01f
 #define NUM_STATES 2
 #define NUM_OBS 1
 
@@ -54,5 +54,16 @@ typedef struct {
 //=========================== variables =======================================
 
 //=========================== prototypes ======================================
+
+void ekf_init(void * ekf, int n, int m);
+
+/**
+  * Runs one step of EKF prediction and update. Your code should first build a model, setting
+  * the contents of <tt>ekf.fx</tt>, <tt>ekf.F</tt>, <tt>ekf.hx</tt>, and <tt>ekf.H</tt> to appropriate values.
+  * @param ekf pointer to structure EKF 
+  * @param z array of measurement (observation) values
+  * @return 0 on success, 1 on failure caused by non-positive-definite matrix.
+  */
+int ekf_step(void * ekf, double * z);
 
 #endif

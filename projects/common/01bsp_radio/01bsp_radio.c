@@ -65,6 +65,8 @@ end of frame event), it will turn on its error LED.
 #define LEFT_LIM 102.0f
 #define RIGHT_LIM 90.0f
 
+#define DT 1.0f // FIXME: figure out kalman time step in us?
+
 //=========================== typedef =========================================
 
 typedef struct {
@@ -303,11 +305,11 @@ location_t localize_mimsy(pulse_t *pulses_local) {
             case ((int) Sync):
                 break;
             case ((int) Horiz):
-                loc.phi = get_period_us(curr_pulse.fall, next_pulse.rise) * sweep_velocity;
+                loc.phi = get_period_us(curr_pulse.rise, next_pulse.rise) * sweep_velocity;
                 loc.r_horiz = distance_fit_horiz(get_period_us(next_pulse.rise, next_pulse.fall));
                 break;
             case ((int) Vert):
-                loc.theta = get_period_us(curr_pulse.fall, next_pulse.rise) * sweep_velocity;
+                loc.theta = get_period_us(curr_pulse.rise, next_pulse.rise) * sweep_velocity;
                 loc.r_vert = distance_fit_vert(get_period_us(next_pulse.rise, next_pulse.fall));
                 break;
             default:
@@ -340,6 +342,31 @@ void configure_pins(void){ // TODO: set to do lighthouse setup
     for(_i = 0xFFFF; _i != 0; _i--);
     
     precision_timers_init();
+}
+
+static void model() {
+    // TODO: define your dynamics model
+}
+
+void configure_ekf(void) {
+    // configure Extended Kalman Filter for fusing lighthouse and acceleration data
+    ekf_t ekf;
+    ekf_init(&ekf, NUM_STATES, NUM_OBS);
+
+    const double S_lh = LH_RAD_VAR;
+    const double S_a = ACCEL_G_VAR;
+    const double Rk[4] = {S_lh * S_lh, 0, 0, 0};
+    const double Qk[4] = {(S_a * S_a)*(DT*DT*DT*DT) / 4.0, (S_a * S_a)*(DT*DT*DT) / 2.0, (S_a * S_a)*(DT*DT*DT) / 2.0, (S_a * S_a)*(DT*DT)};
+
+    // init covariances of state/measurement noise, can be arbitrary?
+    int i;
+    for (i = 0; i < NUM_STATES; i += 1) { ekf->P[i][i] = 1; }
+    for (i = 0; i < NUM_OBS; i += 1) { ekf->R[i][i] = 1; } // make this very low
+
+    ekf->x[0] = 0; // position
+    ekf->x[1] = 0; // velocity
+
+    // TODO: implement below in mote_main
 }
 
 //=========================== main ============================================
