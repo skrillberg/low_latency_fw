@@ -302,11 +302,11 @@ location_t localize_mimsy(pulse_t *pulses_local) {
             case ((int) Sync):
                 break;
             case ((int) Horiz):
-                loc.phi = get_period_us(curr_pulse.fall, next_pulse.rise) * sweep_velocity;
+                loc.phi = get_period_us(curr_pulse.rise, next_pulse.rise) * sweep_velocity;
                 loc.r_horiz = distance_fit_horiz(get_period_us(next_pulse.rise, next_pulse.fall));
                 break;
             case ((int) Vert):
-                loc.theta = get_period_us(curr_pulse.fall, next_pulse.rise) * sweep_velocity;
+                loc.theta = get_period_us(curr_pulse.rise, next_pulse.rise) * sweep_velocity;
                 loc.r_vert = distance_fit_vert(get_period_us(next_pulse.rise, next_pulse.fall));
                 break;
             default:
