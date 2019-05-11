@@ -70,6 +70,8 @@ end of frame event), it will turn on its error LED.
 
 #define IMU_ADDRESS 0x69
 #define LOW_POWER 0
+#define ACCEL_SENS 16384.0f // TODO: check this, may have to be more precise??
+#define GYRO_SENS 65.536f
 
 //=========================== typedef =========================================
 
@@ -160,6 +162,7 @@ static const float sweep_velocity = PI / SWEEP_PERIOD_US;
 float imu_data[MAX_SAMPLES][3];
 uint8_t imu_samples;
 bool imu_ready;
+float x; float y; float z;
 
 volatile float valid_angles[MAX_SAMPLES][2];
 volatile pulse_t pulses[PULSE_TRACK_COUNT];
@@ -191,9 +194,27 @@ void imu_init(void) {
     sctimer_enable();
 
     i2c_init();
-    mpu_set_sensors(INV_XYZ_ACCEL); // turn on sensors
-    mpu_set_accel_fsr(16); // set fsr for accel
-    mpu_set_sample_rate(500); // set sampling rate to 500Hz
+    uint8_t readbyte;
+
+    i2c_write_byte(IMU_ADDRESS, MPU9250_PWR_MGMT_1); // reset
+    i2c_write_byte(IMU_ADDRESS, 0x80);
+
+    i2c_write_byte(IMU_ADDRESS, MPU9250_PWR_MGMT_1); // enable/wake sensor
+    i2c_write_byte(IMU_ADDRESS, 0x00);
+
+    uint8_t bytes[2] = {MPU9250_PWR_MGMT_1, 0x01}; 
+    i2c_write_bytes(IMU_ADDRESS, bytes, 2); // set gyro clock source  
+
+    uint8_t *byteptr = &readbyte;
+
+    i2c_write_byte(IMU_ADDRESS, MPU9250_PWR_MGMT_2); // reset
+    i2c_read_byte(IMU_ADDRESS, byteptr);
+
+    i2c_write_byte(IMU_ADDRESS, MPU9250_PWR_MGMT_2); // enable/wake sensor
+    i2c_write_byte(IMU_ADDRESS, 0x00);
+
+    i2c_write_byte(IMU_ADDRESS, MPU9250_PWR_MGMT_2);
+    i2c_read_byte(IMU_ADDRESS, byteptr);
 }
 
 void get_scalar_accel(void) {//(uint16_t *accel) { // FIXME: put back when done debugging, is there a way to have this service an interrupt?
@@ -201,36 +222,87 @@ void get_scalar_accel(void) {//(uint16_t *accel) { // FIXME: put back when done 
     uint8_t readbyte;  
     uint8_t *byteptr = &readbyte;
 
-    uint16_t ax;
-    uint16_t ay;
-    uint16_t az;
-
-    if (imu_samples >= MAX_SAMPLES) { return; }
+    int16_t ax; int16_t gx;
+    int16_t ay; int16_t gy;
+    int16_t az; int16_t gz;
 
     // Accel X
     i2c_read_register(address, MPU9250_ACCEL_XOUT_H, byteptr);
-    ax = ((uint16_t) readbyte) << 8;
+    ax = ((int16_t) readbyte) << 8;
 
     i2c_read_register(address, MPU9250_ACCEL_XOUT_L, byteptr);
-    ax = ((uint16_t) readbyte) | ax;
+    ax = ((int16_t) readbyte) | ax;
 
     // Accel Y
     i2c_read_register(address, MPU9250_ACCEL_YOUT_H, byteptr);
-    ay = ((uint16_t) readbyte) << 8;
+    ay = ((int16_t) readbyte) << 8;
 
     i2c_read_register(address, MPU9250_ACCEL_YOUT_L, byteptr);
-    ay = ((uint16_t) readbyte) | ay;
+    ay = ((int16_t) readbyte) | ay;
 
     // Accel Z
     i2c_read_register(address, MPU9250_ACCEL_ZOUT_H, byteptr);
-    az = ((uint16_t) readbyte) << 8;
+    az = ((int16_t) readbyte) << 8;
 
     i2c_read_register(address, MPU9250_ACCEL_ZOUT_L, byteptr);
-    az = ((uint16_t) readbyte) | az;
+    az = ((int16_t) readbyte) | az;
+
+    // Gyro X
+    i2c_read_register(address,MPU9250_GYRO_XOUT_H,byteptr);
+    gx = ((int16_t) readbyte) << 8;
+
+    i2c_read_register(address,MPU9250_GYRO_XOUT_L,byteptr);
+    gx = ((int16_t) readbyte) | gx;
+
+    // Gyro Y
+    i2c_read_register(address,MPU9250_GYRO_YOUT_H,byteptr);
+    gy = ((int16_t) readbyte) << 8;
+
+    i2c_read_register(address,MPU9250_GYRO_YOUT_L,byteptr);
+    gy = ((int16_t) readbyte) | gy;
+
+    // Gyro Z
+    i2c_read_register(address,MPU9250_GYRO_ZOUT_H,byteptr);
+    gz = ((int16_t) readbyte) << 8;
+
+    i2c_read_register(address,MPU9250_GYRO_ZOUT_L,byteptr);
+    gz = ((int16_t) readbyte) | gz;
+
+    timestamp = TimerValueGet(GPTIMER2_BASE, GPTIMER_A);
+
+    x = ((float) ax) / 16000.0; y = ((float) ay) / 16000.0; z = ((float) az) / 16000.0;
+
+    if (imu_samples >= MAX_SAMPLES) { return; }
 
     // accel[0] = ax; accel[1] = ay; accel[2] = az;
     imu_data[imu_samples][0] = ((float) ax) / 16000.0; imu_data[imu_samples][1] = ((float) ay) / 16000.0; imu_data[imu_samples][2] = ((float) az) / 16000.0;
     imu_samples += 1;
+}
+
+void complementary_filter(short accelData[3], short gyroData[3], float *pitch, float *roll, float dt)
+{
+    float pitch_acc, roll_acc;
+    
+    // crux of complementary filter, weight gyro data vs. accel data
+    float W_GYRO = 0.98;
+    float W_ACCEL = 1 - W_GYRO; 
+
+    // sensitivity = -16 to 16 G at 16Bit -> 16G = 262144 && 0.5G = 8192;
+    float LOW_THRESH = 0.5 * ACCEL_SENS; float HIGH_THRESH = 16 * ACCEL_SENS;      
+
+    // Integrate the gyroscope data -> int(angularSpeed) = angle
+    *pitch += ((float) gyroData[0] / GYRO_SENS) * dt;
+    *roll -= ((float) gyroData[1] / GYRO_SENS) * dt;
+
+    // compensate for drift with accelerometer data if !bullshit
+    int accel_check = abs(accData[0]) + abs(accData[1]) + abs(accData[2]);
+    if (accel_check > LOW_THRESH && accel_check < HIGH_THRESH) {
+        pitch_acc = atan2f((float) accelData[1], (float) accelData[2]) * 180 / PI;
+        roll_acc = atan2f((float) accelData[0], (float) accelData[2]) * 180 / PI;
+
+        *pitch = *pitch * W_GYRO + pitchAcc * W_ACCEL;
+        *roll = *roll * W_GYRO + rollAcc * W_ACCEL;
+    }
 }
 
 void precision_timers_init(void){
@@ -438,6 +510,8 @@ int mote_main(void) {
     board_init();
     imu_init();
     configure_pins();
+
+    x = 0; y = 0; z = 0;
 
     while (!finished) {
         while (!imu_ready) {
