@@ -146,9 +146,9 @@ static const uint32_t timer_cnt_32 = 0xFFFFFFFF;
 static const uint32_t timer_cnt_16 = 0xFFFF;
 static const uint32_t timer_cnt_24 = 0xFFFFFF;
 
-/* Definition of global variables for mattress calibration. */
 volatile float azimuth;
 volatile float elevation;
+volatile bool update;
 
 static const float sweep_velocity = PI / SWEEP_PERIOD_US;
 
@@ -344,8 +344,20 @@ void configure_pins(void){ // TODO: set to do lighthouse setup
     precision_timers_init();
 }
 
-static void model() {
+static void model(*ekf, double accel, double phi, bool update) {
     // TODO: define your dynamics model
+    ekf->fx[0] = ekf->x[0] + dt * ekf->x[1];
+    ekf->fx[1] = ekf->x[1] + dt * accel;
+
+    // TODO: process Jacobian? ask craig
+
+    if (update) {
+        ekf-> hx[0] = atan2(phi);
+        ekf-> hx[1] = 0;
+    }
+
+    ekf->H[0][0] = 1.0 / (1.0 + ekf->x[0]*ekf->x[0]);
+    ekf->H[0][1] = 0; ekf->H[1][0] = 0; ekf->H[1][1] = 0;
 }
 
 void configure_ekf(void) {
@@ -427,6 +439,16 @@ int mote_main(void) {
     app_vars.flags &= ~APP_FLAG_TIMER; app_vars.flags &= ~APP_FLAG_START_FRAME; app_vars.flags &= ~APP_FLAG_END_FRAME;
 
     while (true) {
+        if (new_data) {
+            model(&ekf, accel, azimuth, update);
+
+            if (update) {
+                ekf_step(&ekf, azimuth);
+                update = false;
+            }
+
+            // TODO: update positions & ignore velocities       
+        }
         //==== APP_FLAG_START_FRAME (TX or RX)
         if (app_vars.flags & APP_FLAG_START_FRAME) {
             // start of frame
@@ -535,12 +557,14 @@ void pulse_handler_gpio_a(void) {
         location_t loc = localize_mimsy(pulses_local);
         if (!loc.valid) { test_count += 1; return; }
 
+        // TODO: set update flag
+
         valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = loc.theta;
         azimuth = loc.phi * 180/PI; elevation = loc.theta * 180/PI;
 
         samples += 1; if (samples == MAX_SAMPLES) samples = 0;
 
-        if ((moving_right && (azimuth <= 90.0)) || (!moving_right && (azimuth >= 102.0))) {
+        if ((moving_right && (azimuth <= 90.0)) || (!moving_right && (azimuth >= 102.0))) { // TODO: fix this workflow into Kalman filter logic
             transmitting = true;
             app_vars.flags |= APP_FLAG_TIMER;
             // GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,GPIO_PIN_0);
