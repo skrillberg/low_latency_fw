@@ -146,9 +146,12 @@ static const uint32_t timer_cnt_32 = 0xFFFFFFFF;
 static const uint32_t timer_cnt_16 = 0xFFFF;
 static const uint32_t timer_cnt_24 = 0xFFFFFF;
 
+double accel;
 volatile float azimuth;
 volatile float elevation;
+volatile bool new_data;
 volatile bool update;
+uint32_t ekf_fail;
 
 static const float sweep_velocity = PI / SWEEP_PERIOD_US;
 
@@ -346,18 +349,19 @@ void configure_pins(void){ // TODO: set to do lighthouse setup
 
 static void model(*ekf, double accel, double phi, bool update) {
     // TODO: define your dynamics model
-    ekf->fx[0] = ekf->x[0] + dt * ekf->x[1];
-    ekf->fx[1] = ekf->x[1] + dt * accel;
+    ekf->fx[0] = ekf->x[0] + DT * ekf->x[1];
+    ekf->fx[1] = ekf->x[1] + DT * accel;
 
-    // TODO: process Jacobian? ask craig
+    F[0][0] = 1; F[0][1] = DT;
+    F[1][0] = 0; F[1][1] = 1;
 
     if (update) {
-        ekf-> hx[0] = atan2(phi);
-        ekf-> hx[1] = 0;
-    }
+        ekf->hx[0] = atan2(ekf->x[0]);
+        ekf->hx[1] = 0;
 
-    ekf->H[0][0] = 1.0 / (1.0 + ekf->x[0]*ekf->x[0]);
-    ekf->H[0][1] = 0; ekf->H[1][0] = 0; ekf->H[1][1] = 0;
+        ekf->H[0][0] = 1.0 / (1.0 + x*x);
+        ekf->H[0][1] = 0; ekf->H[1][0] = 0; ekf->H[1][1] = 0;
+    }
 }
 
 void configure_ekf(void) {
@@ -367,18 +371,29 @@ void configure_ekf(void) {
 
     const double S_lh = LH_RAD_VAR;
     const double S_a = ACCEL_G_VAR;
-    const double Rk[4] = {S_lh * S_lh, 0, 0, 0};
-    const double Qk[4] = {(S_a * S_a)*(DT*DT*DT*DT) / 4.0, (S_a * S_a)*(DT*DT*DT) / 2.0, (S_a * S_a)*(DT*DT*DT) / 2.0, (S_a * S_a)*(DT*DT)};
+    const double Rk[2][2] = {{S_lh * S_lh, 0},
+                             {0,           0}};
+    const double Qk[2][2] = {{(S_a * S_a)*(DT*DT*DT*DT) / 4.0, (S_a * S_a)*(DT*DT*DT) / 2.0},
+                             {(S_a * S_a)*(DT*DT*DT) / 2.0,            (S_a * S_a)*(DT*DT)}};
 
     // init covariances of state/measurement noise, can be arbitrary?
-    int i;
-    for (i = 0; i < NUM_STATES; i += 1) { ekf->P[i][i] = 1; }
-    for (i = 0; i < NUM_OBS; i += 1) { ekf->R[i][i] = 1; } // make this very low
+    int i; int j;
+    for (i = 0; i < NUM_STATES; i += 1) {
+        ekf->P[i][i] = 1;
+    }
+    for (i = 0; i < NUM_OBS; i += 1) {
+        for (j = 0; i < NUM_OBS; j += 1) {
+            ekf->R[i][j] = Rk[i][j]; } // make this very low
+        }
+    }
+    for (i = 0; i < NUM_OBS; i += 1) {
+        for (j = 0; i < NUM_OBS; j += 1) {
+            ekf->Q[i][j] = Qk[i][j]; } // make this very low
+        }
+    }
 
     ekf->x[0] = 0; // position
     ekf->x[1] = 0; // velocity
-
-    // TODO: implement below in mote_main
 }
 
 //=========================== main ============================================
@@ -391,8 +406,12 @@ int mote_main(void) {
     moving_right = true;
     transmitting = false;
 
-    azimuth = ((float)(LEFT_LIM + RIGHT_LIM)) / 2;
-    broken1 = 0; broken2 = 0; broken3 = 0;
+    azimuth = 0.0;
+    broken1 = 0; broken2 = 0; broken3 = 0; ekf_fail = 0;
+
+    accel = 0;
+    
+    new_data = false; update = false;
 
     uint16_t passphrase[4] = {0xAC,0xAC,0xA5,0XB1};  // Mote1 ID
     // uint16_t passphrase[4] = {0xBD,0xBD,0xB6,0XC2}; // Mote2 ID
@@ -431,7 +450,6 @@ int mote_main(void) {
     // configure localization interrupt timing scheme
     configure_pins();
 
-
     // TODO: what's up with this???
     // HWREG(RFCORE_XREG_RXENABLE) = 0; //disable rx
     // HWREG(RFCORE_XREG_FRMCTRL1)    = HWREG(RFCORE_XREG_FRMCTRL1) & 0b110; //prevents stxon instruction from enabling rx, this is really important because it prevents tx motes from ever receiving anything
@@ -439,15 +457,24 @@ int mote_main(void) {
     app_vars.flags &= ~APP_FLAG_TIMER; app_vars.flags &= ~APP_FLAG_START_FRAME; app_vars.flags &= ~APP_FLAG_END_FRAME;
 
     while (true) {
-        if (new_data) {
+        if (new_data && !transmitting) {
+            new_data = false;
             model(&ekf, accel, azimuth, update);
 
             if (update) {
-                ekf_step(&ekf, azimuth);
+                if (ekf_step(&ekf, azimuth)) {
+                    ekf_fail += 1;
+                }
                 update = false;
             }
 
-            // TODO: update positions & ignore velocities       
+            // TODO: update positions & ignore velocities     
+            double pos = ekf.x[0];
+            if ((moving_right && (pos <= LEFT_LIM)) || (!moving_right && (pos >= RIGHT_LIM))) {
+                transmitting = true;
+                app_vars.flags |= APP_FLAG_TIMER;
+                rx_packet_count += 1;
+            }
         }
         //==== APP_FLAG_START_FRAME (TX or RX)
         if (app_vars.flags & APP_FLAG_START_FRAME) {
@@ -557,19 +584,12 @@ void pulse_handler_gpio_a(void) {
         location_t loc = localize_mimsy(pulses_local);
         if (!loc.valid) { test_count += 1; return; }
 
-        // TODO: set update flag
+        azimuth = 180 - loc.phi; new_data = true; update = true;
 
         valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = loc.theta;
         azimuth = loc.phi * 180/PI; elevation = loc.theta * 180/PI;
 
         samples += 1; if (samples == MAX_SAMPLES) samples = 0;
-
-        if ((moving_right && (azimuth <= 90.0)) || (!moving_right && (azimuth >= 102.0))) { // TODO: fix this workflow into Kalman filter logic
-            transmitting = true;
-            app_vars.flags |= APP_FLAG_TIMER;
-            // GPIOPinWrite(GPIO_D_BASE,GPIO_PIN_0,GPIO_PIN_0);
-            rx_packet_count += 1;
-        }
     }
 }
 
