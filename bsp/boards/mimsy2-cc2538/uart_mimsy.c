@@ -9,9 +9,9 @@
 #include "sys_ctrl.h"
 #include "gpio.h"
 
-#define EXAMPLE_PIN_UART_RXD            GPIO_PIN_1
+#define EXAMPLE_PIN_UART_RXD            GPIO_PIN_0
 #define EXAMPLE_PIN_UART_TXD            GPIO_PIN_2
-#define EXAMPLE_GPIO_BASE               GPIO_A_BASE
+#define EXAMPLE_GPIO_BASE               GPIO_D_BASE
 
 
 void uartMimsyInit(){
@@ -28,30 +28,30 @@ void uartMimsyInit(){
     //
     // Enable UART peripheral module
     //
-    SysCtrlPeripheralEnable(SYS_CTRL_PERIPH_UART0);
-
+    SysCtrlPeripheralEnable(SYS_CTRL_PERIPH_UART1);
+    UARTEnable(UART1_BASE);
     //
     // Disable UART function
     //
-    UARTDisable(UART0_BASE);
+    UARTDisable(UART1_BASE);
 
     //
     // Disable all UART module interrupts
     //
-    UARTIntDisable(UART0_BASE, 0x1FFF);
+    UARTIntDisable(UART1_BASE, 0x1FFF);
 
     //
     // Set IO clock as UART clock source
     //
-    UARTClockSourceSet(UART0_BASE, UART_CLOCK_PIOSC);
+    UARTClockSourceSet(UART1_BASE, UART_CLOCK_PIOSC);
 
     //
     // Map UART signals to the correct GPIO pins and configure them as
     // hardware controlled.
     //
-    IOCPinConfigPeriphOutput(EXAMPLE_GPIO_BASE, EXAMPLE_PIN_UART_TXD, IOC_MUX_OUT_SEL_UART0_TXD);
+    IOCPinConfigPeriphOutput(EXAMPLE_GPIO_BASE, EXAMPLE_PIN_UART_TXD, IOC_MUX_OUT_SEL_UART1_TXD);
     GPIOPinTypeUARTOutput(EXAMPLE_GPIO_BASE, EXAMPLE_PIN_UART_TXD); 
-    IOCPinConfigPeriphInput(EXAMPLE_GPIO_BASE, EXAMPLE_PIN_UART_RXD, IOC_UARTRXD_UART0);
+    IOCPinConfigPeriphInput(EXAMPLE_GPIO_BASE, EXAMPLE_PIN_UART_RXD, IOC_UARTRXD_UART1);
     GPIOPinTypeUARTInput(EXAMPLE_GPIO_BASE, EXAMPLE_PIN_UART_RXD);
      
     //
@@ -60,16 +60,16 @@ void uartMimsyInit(){
     // frequency.  This could be also be a variable or hard coded value
     // instead of a function call.
     //
-   // UARTConfigSetExpClk(UART0_BASE, SysCtrlClockGet(), 115200,
-                     //   (UART_CONFIG_WLEN_8 | UART_CONFIG_STOP_ONE |
-                     //    UART_CONFIG_PAR_NONE));
+    UARTConfigSetExpClk(UART1_BASE, SysCtrlClockGet(), 115200,
+                        (UART_CONFIG_WLEN_8 | UART_CONFIG_STOP_ONE |
+                         UART_CONFIG_PAR_NONE));
   //  UARTEnable(UART0_BASE);
-    UARTStdioInitExpClk(0,115200*2); //adjusted to account for clock difference caused by openwsn clock scheme
+    UARTStdioInitExpClk(1,115200*2); //adjusted to account for clock difference caused by openwsn clock scheme
     //
     // Put a character to show start of example.  This will display on the
     // terminal.
     //  
-  
+    UARTEnable(UART1_BASE);
 
 }
 

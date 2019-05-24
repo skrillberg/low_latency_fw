@@ -25,10 +25,12 @@ end of frame event), it will turn on its error LED.
 #include "i2c.h"
 #include "mpu.h"
 #include "inv_mpu.h"
+#include "gptimer.h"
 #include <headers/hw_memmap.h>
 #include <headers/hw_ioc.h>
 #include <headers/hw_ssi.h>
 #include <headers/hw_sys_ctrl.h>
+#include <headers/hw_gptimer.h>
 #include <headers/hw_ints.h>
 #include <headers/hw_rfcore_sfr.h>
 #include <headers/hw_rfcore_sfr.h>
@@ -63,7 +65,7 @@ end of frame event), it will turn on its error LED.
 #define SWEEP_PERIOD_US 8333.333333f
 
 #define CLOCK_SPEED_MHZ 32.0f
-#define MAX_SAMPLES 300
+#define MAX_SAMPLES 600
 
 #define LEFT_LIM 102.0f
 #define RIGHT_LIM 90.0f
@@ -73,7 +75,19 @@ end of frame event), it will turn on its error LED.
 #define ACCEL_SENS 16384.0f // TODO: check this, may have to be more precise??
 #define GYRO_SENS 65.536f
 
+#define CALIB_DATA_STRUCT_SIZE 4
+#define PAGE_SIZE                2048
+#define PAGE_TO_ERASE            14
+#define PAGE_TO_ERASE_START_ADDR (FLASH_BASE + (PAGE_TO_ERASE * PAGE_SIZE))
+#define DATAPOINTS			100
+#define FLASH_PAGES_TOUSE	50
+#define FLASH_PAGE_STORAGE_START 100 //first flash page to start at. TODO: make sure this doesn't overlap
+
 //=========================== typedef =========================================
+
+typedef enum {
+   Sync, Vert, Horiz,
+} Pulses;
 
 typedef struct {
    uint32_t                rise;
@@ -243,7 +257,7 @@ void imu_init(void) {
     i2c_read_byte(IMU_ADDRESS, byteptr);
 }
 
-void get_scalar_accel(void) {//(uint16_t *accel) { // FIXME: put back when done debugging, is there a way to have this service an interrupt?
+void get_scalar_accel(uint16_t *accel, uint32_t *timestamp) { // FIXME: put back when done debugging, is there a way to have this service an interrupt?
     uint8_t address = IMU_ADDRESS;
     uint8_t readbyte;  
     uint8_t *byteptr = &readbyte;
@@ -297,15 +311,22 @@ void get_scalar_accel(void) {//(uint16_t *accel) { // FIXME: put back when done 
     timestamp = TimerValueGet(GPTIMER2_BASE, GPTIMER_A);
 
     x = ((float) ax) / 16000.0; y = ((float) ay) / 16000.0; z = ((float) az) / 16000.0;
+    accel[0] = ax; accel[1] = ay; accel[2] = az; // TODO: debias from gravity using gyro readings
 
-    if (imu_samples >= MAX_SAMPLES) { return; }
-
-    // accel[0] = ax; accel[1] = ay; accel[2] = az;
     imu_data[imu_samples][0] = ((float) ax) / 16000.0; imu_data[imu_samples][1] = ((float) ay) / 16000.0; imu_data[imu_samples][2] = ((float) az) / 16000.0;
     imu_samples += 1;
+
+    if (imu_samples >= MAX_SAMPLES) {
+        IntDisable(gptmFallingEdgeInt);
+        imu_samples = 0; int _i;
+        for (_i = 0; _i < MAX_SAMPLES; _i += 1) {
+            mimsyPrintf("%d, %d, %d\n", (int) test_count, (int) (imu_data[imu_samples][0] * 100000), (int) timestamp);
+        }
+        IntEnable(gptmFallingEdgeInt);
+    }
 }
 
-void complementary_filter(short accelData[3], short gyroData[3], float *pitch, float *roll, float dt)
+/* void complementary_filter(short accelData[3], short gyroData[3], float *pitch, float *roll, float dt)
 {
     float pitch_acc, roll_acc;
     
@@ -321,15 +342,15 @@ void complementary_filter(short accelData[3], short gyroData[3], float *pitch, f
     *roll -= ((float) gyroData[1] / GYRO_SENS) * dt;
 
     // compensate for drift with accelerometer data if !bullshit
-    int accel_check = abs(accData[0]) + abs(accData[1]) + abs(accData[2]);
+    int accel_check = abs(accelData[0]) + abs(accelData[1]) + abs(accelData[2]);
     if (accel_check > LOW_THRESH && accel_check < HIGH_THRESH) {
         pitch_acc = atan2f((float) accelData[1], (float) accelData[2]) * 180 / PI;
         roll_acc = atan2f((float) accelData[0], (float) accelData[2]) * 180 / PI;
 
-        *pitch = *pitch * W_GYRO + pitchAcc * W_ACCEL;
-        *roll = *roll * W_GYRO + rollAcc * W_ACCEL;
+        *pitch = *pitch * W_GYRO + pitch_acc * W_ACCEL;
+        *roll = *roll * W_GYRO + roll_acc * W_ACCEL;
     }
-}
+} */
 
 void precision_timers_init(void){
     // SysCtrlPeripheralEnable(SYS_CTRL_PERIPH_GPT0); // enables timer0 module
@@ -483,9 +504,7 @@ location_t localize_mimsy(pulse_t *pulses_local) {
     return loc;
 }
 
-void configure_pins(void){ // TODO: set to do lighthouse setup
-    // localize and store
-    modular_ptr = 0; pulse_count = 0; samples = 0; test_count = 0;
+void configure_pins(void){
     // initialize edges
     unsigned short int i;
     for (i = 0; i < PULSE_TRACK_COUNT; i++) {
@@ -516,6 +535,8 @@ int mote_main(void) {
     transmitting = false;
     finished = false;
 
+    modular_ptr = 0; pulse_count = 0; samples = 0; test_count = 0;
+
     azimuth = ((float)(LEFT_LIM + RIGHT_LIM)) / 2;
     broken1 = 0; broken2 = 0; broken3 = 0;
 
@@ -537,13 +558,16 @@ int mote_main(void) {
     imu_init();
     configure_pins();
 
+    uartMimsyInit();
+
     x = 0; y = 0; z = 0;
 
     while (!finished) {
         while (!imu_ready) {
             // wait for new IMU update
         }
-        get_scalar_accel(); // get acceleration until FIFO is empty?
+        int accel[3]; int timestamp;
+        get_scalar_accel(accel, &timestamp);
         imu_ready = false;
     }
 
@@ -684,7 +708,7 @@ void pulse_handler_gpio_a(void) {
         pulse_count = 0; // TODO: maybe only do this if pulses are valid???
         // recover azimuth and elevation
         location_t loc = localize_mimsy(pulses_local);
-        if (!loc.valid) { test_count += 1; return; }
+        if (!loc.valid) { return; }
 
         valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = loc.theta;
         azimuth = loc.phi * 180/PI; elevation = loc.theta * 180/PI;
@@ -784,7 +808,7 @@ void flashReadCalibSection(CalibDataCard card, CalibData * dataArray, uint32_t s
   uint32_t pageAddr=FLASH_BASE+card.page*PAGE_SIZE;
 
   for(uint32_t i=0;i<size;i++){
-    for(uint32_t j=0;j<PULSE_DATA_STRUCT_SIZE/4;j++){
+    for(uint32_t j=0;j<CALIB_DATA_STRUCT_SIZE/4;j++){
        IntMasterDisable();
        dataArray[i].bits[j]=FlashGet(pageAddr+i*CALIB_DATA_STRUCT_SIZE+j*4+wordsRead*4);
        IntMasterEnable();
