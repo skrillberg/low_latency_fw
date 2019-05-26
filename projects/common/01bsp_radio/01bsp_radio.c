@@ -17,11 +17,12 @@ end of frame event), it will turn on its error LED.
 \author Thomas Watteyne <watteyne@eecs.berkeley.edu>, August 2014.
 */
 
+#include <stdlib.h>
+#include <stdio.h>
 #include "board.h"
 #include "radio.h"
 #include "leds.h"
 #include "sctimer.h"
-#include "kalman.h"
 #include "i2c.h"
 #include "mpu.h"
 #include "inv_mpu.h"
@@ -42,9 +43,10 @@ end of frame event), it will turn on its error LED.
 #include <source/gptimer.h>
 #include <source/sys_ctrl.h>
 
+
 //=========================== defines =========================================
 
-#define LENGTH_PACKET   8+LENGTH_CRC ///< maximum length is 127 bytes
+#define LENGTH_PACKET   8+LENGTH_CRC ///< maximum length is 127 bytes --> TODO: use 100
 #define CHANNEL         16             ///< 11=2.405GHz
 #define TX_CHANNEL	16	       /// tx channel of individual mote
 #define TIMER_PERIOD    0xff         ///< 0xff = 125 Hz
@@ -67,8 +69,8 @@ end of frame event), it will turn on its error LED.
 #define CLOCK_SPEED_MHZ 32.0f
 #define MAX_SAMPLES 250
 
-#define LEFT_LIM 102.0f
-#define RIGHT_LIM 90.0f
+#define LEFT_LIM -1.8f
+#define RIGHT_LIM 1.8f
 
 #define DT 1.0f // FIXME: figure out kalman time step in us?
 #define IMU_ADDRESS 0x69
@@ -76,7 +78,6 @@ end of frame event), it will turn on its error LED.
 #define ACCEL_SENS 16384.0f // TODO: check this, may have to be more precise??
 #define GYRO_SENS 65.536f
 
-#define CALIB_DATA_STRUCT_SIZE 4
 #define PAGE_SIZE                2048
 #define PAGE_TO_ERASE            14
 #define PAGE_TO_ERASE_START_ADDR (FLASH_BASE + (PAGE_TO_ERASE * PAGE_SIZE))
@@ -104,29 +105,6 @@ typedef struct {
 	uint8_t               asn[5];
 	int					   valid;
 } location_t;
-
-/*CalibData is a union data structure used to store MIMSY's mattress calibration data in flash. Access the struct
-type of this union is used for accessing and setting the data. The uint32 array version
-of the struct is used for reading and writing to flash*/
-typedef union CalibData {
-  struct {
-  uint32_t azimuth;
-} fields;
-  struct {
-  int32_t azimuth;
-} signedfields;
-uint32_t bits[1];
-} CalibData;
-
-/*This struct is used to keep track of where data was written to. This struct
-must be passed to flashWriteCalib where it is updated to include the flash location
-of the data. A written data card is passed to flashReadCalib inorder to read the
-data from that location*/
-typedef struct CalibDataCard{
-    uint32_t page;
-    uint32_t startTime;
-    uint32_t endTime;
-} CalibDataCard;
 
 //=========================== variables =======================================
 //bool isTx = true;
@@ -177,6 +155,9 @@ void pulse_handler_gpio_a(void);
 void pulse_handler_gpio_d(void);
 
 /* Hardware constants. */
+static const uint32_t gptmTimerBase = GPTIMER1_BASE;
+static const uint32_t timer_cnt = 32000000;
+
 static const uint32_t gptmEdgeTimerBase = GPTIMER3_BASE;
 static const uint32_t gptmFallingEdgeInt = INT_TIMER3B;
 static const uint32_t gptmFallingEdgeEvent = GPTIMER_CAPB_EVENT;
@@ -213,12 +194,6 @@ volatile uint32_t broken2;
 volatile uint32_t broken3;
 
 uint32_t test_count;
-
-//=========================== flash ===========================================
-
-void flashWriteCalib(CalibData data[],uint32_t size, uint32_t startPage, int wordsWritten);
-void flashReadCalib(CalibDataCard card, CalibData *data, uint32_t size);
-void flashReadCalibSection(CalibDataCard card, CalibData *data, uint32_t size,int wordsRead);
 
 //=========================== prototypes ======================================
 
@@ -641,6 +616,16 @@ double my_atan2(double y, double x) {
     }
 }
 
+float my_sqrt(float square)
+{
+    float root=square/3;
+    int i;
+    if (square <= 0) return 0;
+    for (i=0; i<32; i++)
+        root = (root + square / root) / 2;
+    return root;
+}
+
 //======================================START===========================================
 
 void imu_init(void) {
@@ -945,17 +930,17 @@ void configure_pins(void){
     
     precision_timers_init();
 }
-
-static void model(*ekf, double accel, double phi, bool update) {
+/*
+static void model(ekf_t * ekf, double accel, double phi, bool update) {
     // TODO: define your dynamics model
     ekf->fx[0] = ekf->x[0] + DT * ekf->x[1];
     ekf->fx[1] = ekf->x[1] + DT * accel;
 
-    F[0][0] = 1; F[0][1] = DT;
-    F[1][0] = 0; F[1][1] = 1;
+    ekf->F[0][0] = 1; ekf->F[0][1] = DT;
+    ekf->F[1][0] = 0; ekf->F[1][1] = 1;
 
     if (update) {
-        ekf->hx[0] = atan2(ekf->x[0]);
+        ekf->hx[0] = my_atan(ekf->x[0]);
         ekf->hx[1] = 0;
 
         ekf->H[0][0] = 1.0 / (1.0 + x*x);
@@ -963,9 +948,8 @@ static void model(*ekf, double accel, double phi, bool update) {
     }
 }
 
-void configure_ekf(void) {
+void configure_ekf(ekf_t * ekf) {
     // configure Extended Kalman Filter for fusing lighthouse and acceleration data
-    ekf_t ekf;
     ekf_init(&ekf, NUM_STATES, NUM_OBS);
 
     const double S_lh = LH_RAD_VAR;
@@ -982,17 +966,26 @@ void configure_ekf(void) {
     }
     for (i = 0; i < NUM_OBS; i += 1) {
         for (j = 0; i < NUM_OBS; j += 1) {
-            ekf->R[i][j] = Rk[i][j]; } // make this very low
+            ekf->R[i][j] = Rk[i][j]; // make this very low
         }
     }
     for (i = 0; i < NUM_OBS; i += 1) {
         for (j = 0; i < NUM_OBS; j += 1) {
-            ekf->Q[i][j] = Qk[i][j]; } // make this very low
+            ekf->Q[i][j] = Qk[i][j]; // make this very low
         }
     }
 
     ekf->x[0] = 0; // position
     ekf->x[1] = 0; // velocity
+} COMMENT */
+
+void precision_timer_init(void){
+    SysCtrlPeripheralEnable(SYS_CTRL_PERIPH_GPT1); // enables timer module
+
+    TimerConfigure(gptmTimerBase, GPTIMER_CFG_PERIODIC_UP); // configures timers
+    TimerLoadSet(gptmTimerBase,GPTIMER_A,timer_cnt_32);
+
+    TimerEnable(gptmTimerBase,GPTIMER_A);
 }
 
 //=========================== main ============================================
@@ -1030,14 +1023,15 @@ int mote_main(void) {
 
     // initialize board
     board_init();
-    imu_init();
-    configure_pins();
 
-    uartMimsyInit();
+    //ekf_t ekf; COMMENT
+    //configure_ekf(&ekf); COMMENT
+
+    //imu_init(); COMMENT
 
     x = 0; y = 0; z = 0;
 
-    while (true) {
+    /* while (true) {
         // lighthouse
     }
 
@@ -1048,9 +1042,7 @@ int mote_main(void) {
         int accel[3]; int timestamp;
         get_scalar_accel(accel, &timestamp);
         imu_ready = false;
-    }
-
-    return;
+    } */
 
     // add callback functions radio
     radio_setStartFrameCb(cb_startFrame);
@@ -1073,6 +1065,8 @@ int mote_main(void) {
     // configure localization interrupt timing scheme
     configure_pins();
 
+    
+
     // TODO: what's up with this???
     // HWREG(RFCORE_XREG_RXENABLE) = 0; //disable rx
     // HWREG(RFCORE_XREG_FRMCTRL1)    = HWREG(RFCORE_XREG_FRMCTRL1) & 0b110; //prevents stxon instruction from enabling rx, this is really important because it prevents tx motes from ever receiving anything
@@ -1082,18 +1076,23 @@ int mote_main(void) {
     while (true) {
         if (new_data && !transmitting) {
             new_data = false;
-            model(&ekf, accel, azimuth, update);
+            /* model(&ekf, accel, azimuth, update);
 
             if (update) {
-                if (ekf_step(&ekf, azimuth)) {
+            double obs[2] = {azimuth, 0};
+                if (ekf_step(&ekf, obs)) {
                     ekf_fail += 1;
                 }
                 update = false;
-            }
+            } */
+
+            // led
+            leds_sync_on();
 
             // TODO: update positions & ignore velocities     
-            double pos = ekf.x[0];
-            if ((moving_right && (pos <= LEFT_LIM)) || (!moving_right && (pos >= RIGHT_LIM))) {
+            // double pos = ekf.x[0];
+            double pos = azimuth * 180/PI;
+            if ((moving_right && (pos >= RIGHT_LIM)) || (!moving_right && (pos <= LEFT_LIM))) {
                 transmitting = true;
                 app_vars.flags |= APP_FLAG_TIMER;
                 rx_packet_count += 1;
@@ -1103,9 +1102,6 @@ int mote_main(void) {
         if (app_vars.flags & APP_FLAG_START_FRAME) {
             // start of frame
             // started sending a packet
-
-            // led
-            leds_sync_on();
         
             // clear flag
             app_vars.flags &= ~APP_FLAG_START_FRAME;
@@ -1214,13 +1210,13 @@ void pulse_handler_gpio_a(void) {
         location_t loc = localize_mimsy(pulses_local);
         if (!loc.valid) { test_count += 1; return; }
 
-        azimuth = 180 - loc.phi; new_data = true; update = true;
+        azimuth = PI/2.0 - loc.phi; new_data = true; update = true;
 
         valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = loc.theta;
-        azimuth = loc.phi * 180/PI; elevation = loc.theta * 180/PI;
+        elevation = azimuth * 180/PI;
 
-        samples += 1;
-        if (samples >= MAX_SAMPLES) {
+        /*samples += 1;
+        if (samples >= MAX_SAMPLES) { // write to flash
             IntDisable(gptmFallingEdgeInt);
             samples = 0; int _i;
             for (_i = 0; _i < MAX_SAMPLES; _i += 1) {
@@ -1229,10 +1225,11 @@ void pulse_handler_gpio_a(void) {
                 int d0 = (int) (reduce_digits(az, 0) * 100000);
                 int d1 = (int) (reduce_digits(az, 5) * 100000);
                 int d2 = (int) (reduce_digits(az, 10) * 100000);
-                mimsyPrintf("%d, %d, %d, %d\r", (int) test_count, d0, d1, d2);
+                // mimsyPrintf("%d, %d, %d, %d\r", (int) test_count, d0, d1, d2);
+                // TODO: write to flash
             }
             IntEnable(gptmFallingEdgeInt);
-        }
+        }*/
     }
 }
 
@@ -1257,81 +1254,4 @@ void cb_timer(void) {
    imu_ready = true;
    
    sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
-}
-
-//=============================== flash ==========================================
-
-/*This function writes a full 2048 KB page-worth of data to flash.
-  Parameters:
-    CalibData data[]: pointer to array of CalibData structures that are to be written to flash
-    uint32_t size: size of data[] in number of CalibData structures
-    uint32_t startPage: Flash page where data is to be written
-    CalibDataCard *card: pointer to an CalibDataCard where the function will record
-      which page the data was written to and which timestamps on the data are included
- */
-void flashWriteCalib(CalibData data[],uint32_t size, uint32_t startPage,int wordsWritten){
-  uint32_t pageStartAddr = FLASH_BASE + (startPage * PAGE_SIZE); // page base address
-  int32_t i32Res;
-
-  uint32_t structNum = size;
-
-  // mimsyPrintf("\n Flash Page Address: %x",pageStartAddr);
-  if (wordsWritten == 0){
-	  i32Res = FlashMainPageErase(pageStartAddr); // erase page so there it can be written to
-  }
-
-  // mimsyPrintf("\n Flash Erase Status: %d",i32Res);
-  for (uint32_t i = 0; i < size; i++){
-    uint32_t* wordified_data=data[i].bits; //retrieves the int32 array representation of the PulseData struct
-    IntMasterDisable(); //disables interrupts to prevent the write operation from being messed up
-    i32Res = FlashMainPageProgram(wordified_data, pageStartAddr+i*CALIB_DATA_STRUCT_SIZE+wordsWritten*4, CALIB_DATA_STRUCT_SIZE); //write struct to flash
-    IntMasterEnable();//renables interrupts
-    // mimsyPrintf("\n Flash Write Status: %d",i32Res);
-   }
-
-   // update card with location information
-   // card->page=startPage;
-   // card->startTime=data[0].fields.timestamp;
-   // card->endTime=data[size-1].fields.timestamp;
-
-}
-
-/*This function reads a page worth of CalibData from flash.
-  Parameters:
-    CalibDataCard card: The CalibDataCard that corresponds to the data that you want to read from flash
-    CalibData * dataArray: pointer that points to location of data array that you want the read operation to be written to
-    uint32_t size: size of dataArray in number of CalibData structures
-*/
-void flashReadCalib(CalibDataCard card, CalibData * dataArray, uint32_t size){
-
-  uint32_t pageAddr=FLASH_BASE+card.page*PAGE_SIZE;
-
-  for(uint32_t i=0;i<size;i++){
-    for(uint32_t j=0;j<CALIB_DATA_STRUCT_SIZE/4;j++){
-      IntMasterDisable();
-      dataArray[i].bits[j] = FlashGet(pageAddr+i*CALIB_DATA_STRUCT_SIZE+j*4);
-      IntMasterEnable();
-    }
-  }
-
-}
-
-/*This function reads a page worth of CalibData from flash.
-  Parameters:
-    CalibDataCard card: The CalibDataCard that corresponds to the data that you want to read from flash
-    CalibData * dataArray: pointer that points to location of data array that you want the read operation to be written to
-    uint32_t size: size of dataArray in number of CalibData structures
-*/
-void flashReadCalibSection(CalibDataCard card, CalibData * dataArray, uint32_t size, int wordsRead){
-
-  uint32_t pageAddr=FLASH_BASE+card.page*PAGE_SIZE;
-
-  for(uint32_t i=0;i<size;i++){
-    for(uint32_t j=0;j<CALIB_DATA_STRUCT_SIZE/4;j++){
-       IntMasterDisable();
-       dataArray[i].bits[j]=FlashGet(pageAddr+i*CALIB_DATA_STRUCT_SIZE+j*4+wordsRead*4);
-       IntMasterEnable();
-    }
-  }
-
 }

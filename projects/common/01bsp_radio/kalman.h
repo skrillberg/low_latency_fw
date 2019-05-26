@@ -14,7 +14,7 @@
 #define LH_RAD_VAR 0.00000001f
 #define ACCEL_G_VAR 0.01f
 #define NUM_STATES 2
-#define NUM_OBS 2
+#define NUM_OBS 1
 
 //=========================== typedef =========================================
 
