@@ -17,20 +17,25 @@ end of frame event), it will turn on its error LED.
 \author Thomas Watteyne <watteyne@eecs.berkeley.edu>, August 2014.
 */
 
-
 #include "board.h"
 #include "radio.h"
 #include "leds.h"
 #include "sctimer.h"
 #include "kalman.h"
+#include "i2c.h"
+#include "mpu.h"
+#include "inv_mpu.h"
+#include "gptimer.h"
 #include <headers/hw_memmap.h>
 #include <headers/hw_ioc.h>
 #include <headers/hw_ssi.h>
 #include <headers/hw_sys_ctrl.h>
+#include <headers/hw_gptimer.h>
 #include <headers/hw_ints.h>
 #include <headers/hw_rfcore_sfr.h>
 #include <headers/hw_rfcore_sfr.h>
 #include <headers/hw_rfcore_xreg.h>
+#include <headers/MPU9250_RegisterMap.h>
 #include <source/interrupt.h>
 #include <source/ioc.h>
 #include <source/gpio.h>
@@ -42,7 +47,7 @@ end of frame event), it will turn on its error LED.
 #define LENGTH_PACKET   8+LENGTH_CRC ///< maximum length is 127 bytes
 #define CHANNEL         16             ///< 11=2.405GHz
 #define TX_CHANNEL	16	       /// tx channel of individual mote
-#define TIMER_PERIOD    0xffff         ///< 0xffff = 2s@32kHz
+#define TIMER_PERIOD    0xff         ///< 0xff = 125 Hz
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
 #define NUM_ATTEMPTS	3	       ///<number of times packet is resent, needs to match number of motes for multichan experiments
@@ -56,18 +61,34 @@ end of frame event), it will turn on its error LED.
 #define MIN_SYNC_PERIOD_US 52
 #define MAX_SYNC_PERIOD_US 138
 
-#define PI 3.14159265f
+#define PI 3.14159265358979323846264338f
 #define SWEEP_PERIOD_US 8333.333333f
 
 #define CLOCK_SPEED_MHZ 32.0f
-#define MAX_SAMPLES 200
+#define MAX_SAMPLES 250
 
 #define LEFT_LIM 102.0f
 #define RIGHT_LIM 90.0f
 
 #define DT 1.0f // FIXME: figure out kalman time step in us?
+#define IMU_ADDRESS 0x69
+#define LOW_POWER 0
+#define ACCEL_SENS 16384.0f // TODO: check this, may have to be more precise??
+#define GYRO_SENS 65.536f
+
+#define CALIB_DATA_STRUCT_SIZE 4
+#define PAGE_SIZE                2048
+#define PAGE_TO_ERASE            14
+#define PAGE_TO_ERASE_START_ADDR (FLASH_BASE + (PAGE_TO_ERASE * PAGE_SIZE))
+#define DATAPOINTS			100
+#define FLASH_PAGES_TOUSE	50
+#define FLASH_PAGE_STORAGE_START 100 //first flash page to start at. TODO: make sure this doesn't overlap
 
 //=========================== typedef =========================================
+
+typedef enum {
+   Sync, Vert, Horiz,
+} Pulses;
 
 typedef struct {
    uint32_t                rise;
@@ -76,17 +97,37 @@ typedef struct {
 } pulse_t;
 
 typedef struct {
-	float                    phi;
-	float                  theta;
-	float                 r_vert;
-	float				 r_horiz;
+	double                    phi;
+	double                  theta;
+	double                 r_vert;
+	double				 r_horiz;
 	uint8_t               asn[5];
 	int					   valid;
 } location_t;
 
-typedef enum {
-   Sync, Vert, Horiz,
-} Pulses;
+/*CalibData is a union data structure used to store MIMSY's mattress calibration data in flash. Access the struct
+type of this union is used for accessing and setting the data. The uint32 array version
+of the struct is used for reading and writing to flash*/
+typedef union CalibData {
+  struct {
+  uint32_t azimuth;
+} fields;
+  struct {
+  int32_t azimuth;
+} signedfields;
+uint32_t bits[1];
+} CalibData;
+
+/*This struct is used to keep track of where data was written to. This struct
+must be passed to flashWriteCalib where it is updated to include the flash location
+of the data. A written data card is passed to flashReadCalib inorder to read the
+data from that location*/
+typedef struct CalibDataCard{
+    uint32_t page;
+    uint32_t startTime;
+    uint32_t endTime;
+} CalibDataCard;
+
 //=========================== variables =======================================
 //bool isTx = true;
 
@@ -97,6 +138,7 @@ uint32_t debounce_complete; // used to debounce button press in interrupt handle
 
 bool moving_right;
 volatile bool transmitting;
+volatile bool finished;
 
 enum {
    APP_FLAG_START_FRAME = 0x01,
@@ -147,15 +189,20 @@ static const uint32_t timer_cnt_16 = 0xFFFF;
 static const uint32_t timer_cnt_24 = 0xFFFFFF;
 
 double accel;
-volatile float azimuth;
-volatile float elevation;
+volatile double azimuth;
+volatile double elevation;
 volatile bool new_data;
 volatile bool update;
 uint32_t ekf_fail;
 
-static const float sweep_velocity = PI / SWEEP_PERIOD_US;
+static const double sweep_velocity = PI / SWEEP_PERIOD_US;
 
-volatile float valid_angles[MAX_SAMPLES][2];
+double imu_data[MAX_SAMPLES][3];
+uint8_t imu_samples;
+bool imu_ready;
+double x; double y; double z;
+
+volatile double valid_angles[MAX_SAMPLES][2];
 volatile pulse_t pulses[PULSE_TRACK_COUNT];
 volatile uint8_t modular_ptr;
 volatile uint8_t pulse_count;
@@ -167,11 +214,565 @@ volatile uint32_t broken3;
 
 uint32_t test_count;
 
+//=========================== flash ===========================================
+
+void flashWriteCalib(CalibData data[],uint32_t size, uint32_t startPage, int wordsWritten);
+void flashReadCalib(CalibDataCard card, CalibData *data, uint32_t size);
+void flashReadCalibSection(CalibDataCard card, CalibData *data, uint32_t size,int wordsRead);
+
 //=========================== prototypes ======================================
 
 void     cb_startFrame(PORT_TIMER_WIDTH timestamp);
 void     cb_endFrame(PORT_TIMER_WIDTH timestamp);
+void     cb_timer(void);
 void	 configure_pins(void);
+
+// ATAN2: adapted from https://opensource.apple.com/source/Libm/Libm-315/Source/Intel/atan.c
+
+static volatile const double Tiny = 0x1p-1022;
+
+/*	double my_atan(double x).
+
+	(This routine appears below, following subroutines.)
+
+	Notes:
+
+		Citations in parentheses below indicate the source of a requirement.
+
+		"C" stands for ISO/IEC 9899:TC2.
+
+		The Open Group specification (IEEE Std 1003.1, 2004 edition) adds no
+		requirements since it defers to C and requires errno behavior only if
+		we choose to support it by arranging for "math_errhandling &
+		MATH_ERRNO" to be non-zero, which we do not.
+
+	Return value:
+
+		For arctangent of +/- zero, return zero with same sign (C F.9 12 and
+		F.9.1.3).
+
+		For arctangent of +/- infinity, return +/- pi/2 (C F.9.1.3).
+
+		For a NaN, return the same NaN (C F.9 11 and 13).  (If the NaN is a
+		signalling NaN, we return the "same" NaN quieted.)
+
+		Otherwise:
+
+			If the rounding mode is round-to-nearest, return arctangent(x)
+			faithfully rounded.  This is not proven but seems likely.
+			Generally, the largest source of errors is the evaluation of the
+			polynomial using double precision.  Some analysis might bound this
+			and prove faithful rounding.  The largest observed error is .814
+			ULP.
+
+			Return a value in [-pi/2, +pi/2] (C 7.12.4.3 3).
+		
+			Not implemented:  In other rounding modes, return arctangent(x)
+			possibly with slightly worse error, not necessarily honoring the
+			rounding mode (Ali Sazegari narrowing C F.9 10).
+
+	Exceptions:
+
+		Raise underflow for a denormal result (C F.9 7 and Draft Standard for
+		Floating-Point Arithmetic P754 Draft 1.2.5 9.5).  If the input is the
+		smallest normal, underflow may or may not be raised.  This is stricter
+		than the older 754 standard.
+
+		May or may not raise inexact, even if the result is exact (C F.9 8).
+
+		Raise invalid if the input is a signalling NaN (C 5.2.4.2.2 3, in spite
+		of C 4.2.1), but not if the input is a quiet NaN (C F.9 11).
+
+		May not raise exceptions otherwise (C F.9 9).
+
+	Properties:
+
+		Not proven:  Monotonic.
+*/
+
+
+// Return arctangent(x) given that 2 < x, with the same properties as atan.
+static double Tail(double x)
+{
+	{
+		static const double HalfPi = 0x3.243f6a8885a308d313198a2e037ap-1;
+
+		// For large x, generate inexact and return pi/2.
+		if (0x1p53 <= x)
+			return HalfPi + Tiny;
+		if (isnan(x))
+			return x - x;
+	}
+
+	static const double p03 = -0x1.5555555554A51p-2;
+	static const double p05 = +0x1.999999989EBCAp-3;
+	static const double p07 = -0x1.249248E1422E3p-3;
+	static const double p09 = +0x1.C71C5EDFED480p-4;
+	static const double p11 = -0x1.745B7F2D72663p-4;
+	static const double p13 = +0x1.3AFD7A0E6EB75p-4;
+	static const double p15 = -0x1.104146B1A1AE8p-4;
+	static const double p17 = +0x1.D78252FA69C1Cp-5;
+	static const double p19 = -0x1.81D33E401836Dp-5;
+	static const double p21 = +0x1.007733E06CEB3p-5;
+	static const double p23 = -0x1.83DAFDA7BD3FDp-7;
+
+	static const double p000 = +0x1.921FB54442D18p0;
+	static const double p001 = +0x1.1A62633145C07p-54;
+
+	double y = 1/x;
+
+	// Square y.
+	double y2 = y * y;
+
+	return p001 - ((((((((((((
+		+ p23) * y2
+		+ p21) * y2
+		+ p19) * y2
+		+ p17) * y2
+		+ p15) * y2
+		+ p13) * y2
+		+ p11) * y2
+		+ p09) * y2
+		+ p07) * y2
+		+ p05) * y2
+		+ p03) * y2 * y + y) + p000;
+}
+
+
+/*	Return arctangent(x) given that 0x1p-27 < |x| <= 1/2, with the same
+	properties as atan.
+*/
+static double atani0(double x)
+{
+	static const double p03 = -0x1.555555555551Bp-2;
+	static const double p05 = +0x1.99999999918D8p-3;
+	static const double p07 = -0x1.2492492179CA3p-3;
+	static const double p09 = +0x1.C71C7096C2725p-4;
+	static const double p11 = -0x1.745CF51795B21p-4;
+	static const double p13 = +0x1.3B113F18AC049p-4;
+	static const double p15 = -0x1.10F31279EC05Dp-4;
+	static const double p17 = +0x1.DFE7B9674AE37p-5;
+	static const double p19 = -0x1.A38CF590469ECp-5;
+	static const double p21 = +0x1.56CDB5D887934p-5;
+	static const double p23 = -0x1.C0EB85F543412p-6;
+	static const double p25 = +0x1.4A9F5C4724056p-7;
+
+	// Square x.
+	double x2 = x * x;
+
+	return ((((((((((((
+		+ p25) * x2
+		+ p23) * x2
+		+ p21) * x2
+		+ p19) * x2
+		+ p17) * x2
+		+ p15) * x2
+		+ p13) * x2
+		+ p11) * x2
+		+ p09) * x2
+		+ p07) * x2
+		+ p05) * x2
+		+ p03) * x2 * x + x;
+}
+
+
+/*	Return arctangent(x) given that 1/2 < x <= 3/4, with the same properties as
+	atan.
+*/
+static double atani1(double x)
+{
+	static const double p00 = +0x1.1E00BABDEFED0p-1;
+	static const double p01 = +0x1.702E05C0B8155p-1;
+	static const double p02 = -0x1.4AF2B78215A1Bp-2;
+	static const double p03 = +0x1.5D0B7E9E69054p-6;
+	static const double p04 = +0x1.A1247CA5D9475p-4;
+	static const double p05 = -0x1.519E110F61B54p-4;
+	static const double p06 = +0x1.A759263F377F2p-7;
+	static const double p07 = +0x1.094966BE2B531p-5;
+	static const double p08 = -0x1.09BC0AB7F914Cp-5;
+	static const double p09 = +0x1.FF3B7C531AA4Ap-8;
+	static const double p10 = +0x1.950E69DCDD967p-7;
+	static const double p11 = -0x1.D88D31ABC3AE5p-7;
+	static const double p12 = +0x1.10F3E20F6A2E2p-8;
+
+	double y = x - 0x1.4000000000027p-1;
+
+	return ((((((((((((
+		+ p12) * y
+		+ p11) * y
+		+ p10) * y
+		+ p09) * y
+		+ p08) * y
+		+ p07) * y
+		+ p06) * y
+		+ p05) * y
+		+ p04) * y
+		+ p03) * y
+		+ p02) * y
+		+ p01) * y
+		+ p00;
+}
+
+
+/*	Return arctangent(x) given that 3/4 < x <= 1, with the same properties as
+	atan.
+*/
+static double atani2(double x)
+{
+	static const double p00 = +0x1.700A7C580EA7Ep-01;
+	static const double p01 = +0x1.21FB781196AC3p-01;
+	static const double p02 = -0x1.1F6A8499714A2p-02;
+	static const double p03 = +0x1.41B15E5E8DCD0p-04;
+	static const double p04 = +0x1.59BC93F81895Ap-06;
+	static const double p05 = -0x1.63B543EFFA4EFp-05;
+	static const double p06 = +0x1.C90E92AC8D86Cp-06;
+	static const double p07 = -0x1.91F7E2A7A338Fp-08;
+	static const double p08 = -0x1.AC1645739E676p-08;
+	static const double p09 = +0x1.152311B180E6Cp-07;
+	static const double p10 = -0x1.265EF51B17DB7p-08;
+	static const double p11 = +0x1.CA7CDE5DE9BD7p-14;
+
+	double y = x - 0x1.c0000000f4213p-1;
+
+	return (((((((((((
+		+ p11) * y
+		+ p10) * y
+		+ p09) * y
+		+ p08) * y
+		+ p07) * y
+		+ p06) * y
+		+ p05) * y
+		+ p04) * y
+		+ p03) * y
+		+ p02) * y
+		+ p01) * y
+		+ p00;
+}
+
+
+/*	Return arctangent(x) given that 1 < x <= 4/3, with the same properties as
+	atan.
+*/
+static double atani3(double x)
+{
+	static const double p00 = +0x1.B96E5A78C5C40p-01;
+	static const double p01 = +0x1.B1B1B1B1B1B3Dp-02;
+	static const double p02 = -0x1.AC97826D58470p-03;
+	static const double p03 = +0x1.3FD2B9F586A67p-04;
+	static const double p04 = -0x1.BC317394714B7p-07;
+	static const double p05 = -0x1.2B01FC60CC37Ap-07;
+	static const double p06 = +0x1.73A9328786665p-07;
+	static const double p07 = -0x1.C0B993A09CE31p-08;
+	static const double p08 = +0x1.2FCDACDD6E5B5p-09;
+	static const double p09 = +0x1.CBD49DA316282p-13;
+	static const double p10 = -0x1.0120E602F6336p-10;
+	static const double p11 = +0x1.A89224FF69018p-11;
+	static const double p12 = -0x1.883D8959134B3p-12;
+
+	double y = x - 0x1.2aaaaaaaaaa96p0;
+
+	return ((((((((((((
+		+ p12) * y
+		+ p11) * y
+		+ p10) * y
+		+ p09) * y
+		+ p08) * y
+		+ p07) * y
+		+ p06) * y
+		+ p05) * y
+		+ p04) * y
+		+ p03) * y
+		+ p02) * y
+		+ p01) * y
+		+ p00;
+}
+
+
+/*	Return arctangent(x) given that 4/3 < x <= 5/3, with the same properties as
+	atan.
+*/
+static double atani4(double x)
+{
+	static const double p00 = +0x1.F730BD281F69Dp-01;
+	static const double p01 = +0x1.3B13B13B13B0Cp-02;
+	static const double p02 = -0x1.22D719C06115Ep-03;
+	static const double p03 = +0x1.C963C83985742p-05;
+	static const double p04 = -0x1.135A0938EC462p-06;
+	static const double p05 = +0x1.13A254D6E5B7Cp-09;
+	static const double p06 = +0x1.DFAA5E77B7375p-10;
+	static const double p07 = -0x1.F4AC1342182D2p-10;
+	static const double p08 = +0x1.25BAD4D85CBE1p-10;
+	static const double p09 = -0x1.E4EEF429EB680p-12;
+	static const double p10 = +0x1.B4E30D1BA3819p-14;
+	static const double p11 = +0x1.0280537F097F3p-15;
+
+	double y = x - 0x1.8000000000003p0;
+
+	return (((((((((((
+		+ p11) * y
+		+ p10) * y
+		+ p09) * y
+		+ p08) * y
+		+ p07) * y
+		+ p06) * y
+		+ p05) * y
+		+ p04) * y
+		+ p03) * y
+		+ p02) * y
+		+ p01) * y
+		+ p00;
+}
+
+
+/*	Return arctangent(x) given that 5/3 < x <= 2, with the same properties as
+	atan.
+*/
+static double atani5(double x)
+{
+	static const double p00 = +0x1.124A85750FB5Cp+00;
+	static const double p01 = +0x1.D59AE78C11C49p-03;
+	static const double p02 = -0x1.8AD3C44F10DC3p-04;
+	static const double p03 = +0x1.2B090AAD5F9DCp-05;
+	static const double p04 = -0x1.881EC3D15241Fp-07;
+	static const double p05 = +0x1.8CB82A74E0699p-09;
+	static const double p06 = -0x1.3182219E21362p-12;
+	static const double p07 = -0x1.2B9AD13DB35A8p-12;
+	static const double p08 = +0x1.10F884EAC0E0Ap-12;
+	static const double p09 = -0x1.3045B70E93129p-13;
+	static const double p10 = +0x1.00B6A460AC05Dp-14;
+
+	double y = x - 0x1.d555555461337p0;
+
+	return ((((((((((
+		+ p10) * y
+		+ p09) * y
+		+ p08) * y
+		+ p07) * y
+		+ p06) * y
+		+ p05) * y
+		+ p04) * y
+		+ p03) * y
+		+ p02) * y
+		+ p01) * y
+		+ p00;
+}
+
+
+// See documentation above.
+double my_atan(double x)
+{
+	if (x < 0)
+		if (x < -1)
+			if (x < -5/3.)
+				if (x < -2)
+					return -Tail(-x);
+				else
+					return -atani5(-x);
+			else
+				if (x < -4/3.)
+					return -atani4(-x);
+				else
+					return -atani3(-x);
+		else
+			if (x < -.5)
+				if (x < -.75)
+					return -atani2(-x);
+				else
+					return -atani1(-x);
+			else
+				if (x < -0x1.d12ed0af1a27fp-27)
+					return atani0(x);
+				else
+					if (x <= -0x1p-1022)
+						// Generate inexact and return x.
+						return (Tiny + 1) * x;
+					else
+						if (x == 0)
+							return x;
+						else
+							// Generate underflow and return x.
+							return x*Tiny + x;
+	else
+		if (x <= +1)
+			if (x <= +.5)
+				if (x <= +0x1.d12ed0af1a27fp-27)
+					if (x < +0x1p-1022)
+						if (x == 0)
+							return x;
+						else
+							// Generate underflow and return x.
+							return x*Tiny + x;
+					else
+						// Generate inexact and return x.
+						return (Tiny + 1) * x;
+				else
+					return atani0(x);
+			else
+				if (x <= +.75)
+					return +atani1(+x);
+				else
+					return +atani2(+x);
+		else
+			if (x <= +5/3.)
+				if (x <= +4/3.)
+					return +atani3(+x);
+				else
+					return +atani4(+x);
+			else
+				if (x <= +2)
+					return +atani5(+x);
+				else
+					return +Tail(+x);
+}
+
+double my_atan2(double y, double x) {
+    if (x > 0) {
+        return my_atan(y / x);
+    } else if (x < 0 && y >= 0) {
+        return my_atan(y / x) + PI;
+    } else if (x < 0 && y < 0) {
+        return my_atan(y / x) - PI;
+    } else if (x == 0 && y > 0) {
+        return PI / 2;
+    } else if (x == 0 && y < 0) {
+        return -PI / 2;
+    } else if (x == 0 && y == 0) {
+        return -1000000000000;
+    }
+}
+
+//======================================START===========================================
+
+void imu_init(void) {
+    // initialize IMU
+    imu_ready = false;
+    imu_samples = 0;
+
+    // start bsp timer
+    sctimer_set_callback(cb_timer);
+    sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
+    sctimer_enable();
+
+    i2c_init();
+    uint8_t readbyte;
+
+    i2c_write_byte(IMU_ADDRESS, MPU9250_PWR_MGMT_1); // reset
+    i2c_write_byte(IMU_ADDRESS, 0x80);
+
+    i2c_write_byte(IMU_ADDRESS, MPU9250_PWR_MGMT_1); // enable/wake sensor
+    i2c_write_byte(IMU_ADDRESS, 0x00);
+
+    uint8_t bytes[2] = {MPU9250_PWR_MGMT_1, 0x01}; 
+    i2c_write_bytes(IMU_ADDRESS, bytes, 2); // set gyro clock source  
+
+    uint8_t *byteptr = &readbyte;
+
+    i2c_write_byte(IMU_ADDRESS, MPU9250_PWR_MGMT_2); // reset
+    i2c_read_byte(IMU_ADDRESS, byteptr);
+
+    i2c_write_byte(IMU_ADDRESS, MPU9250_PWR_MGMT_2); // enable/wake sensor
+    i2c_write_byte(IMU_ADDRESS, 0x00);
+
+    i2c_write_byte(IMU_ADDRESS, MPU9250_PWR_MGMT_2);
+    i2c_read_byte(IMU_ADDRESS, byteptr);
+}
+
+void get_scalar_accel(uint16_t *accel, uint32_t *timestamp) { // FIXME: put back when done debugging, is there a way to have this service an interrupt?
+    uint8_t address = IMU_ADDRESS;
+    uint8_t readbyte;  
+    uint8_t *byteptr = &readbyte;
+
+    int16_t ax; int16_t gx;
+    int16_t ay; int16_t gy;
+    int16_t az; int16_t gz;
+
+    // Accel X
+    i2c_read_register(address, MPU9250_ACCEL_XOUT_H, byteptr);
+    ax = ((int16_t) readbyte) << 8;
+
+    i2c_read_register(address, MPU9250_ACCEL_XOUT_L, byteptr);
+    ax = ((int16_t) readbyte) | ax;
+
+    // Accel Y
+    i2c_read_register(address, MPU9250_ACCEL_YOUT_H, byteptr);
+    ay = ((int16_t) readbyte) << 8;
+
+    i2c_read_register(address, MPU9250_ACCEL_YOUT_L, byteptr);
+    ay = ((int16_t) readbyte) | ay;
+
+    // Accel Z
+    i2c_read_register(address, MPU9250_ACCEL_ZOUT_H, byteptr);
+    az = ((int16_t) readbyte) << 8;
+
+    i2c_read_register(address, MPU9250_ACCEL_ZOUT_L, byteptr);
+    az = ((int16_t) readbyte) | az;
+
+    // Gyro X
+    i2c_read_register(address,MPU9250_GYRO_XOUT_H,byteptr);
+    gx = ((int16_t) readbyte) << 8;
+
+    i2c_read_register(address,MPU9250_GYRO_XOUT_L,byteptr);
+    gx = ((int16_t) readbyte) | gx;
+
+    // Gyro Y
+    i2c_read_register(address,MPU9250_GYRO_YOUT_H,byteptr);
+    gy = ((int16_t) readbyte) << 8;
+
+    i2c_read_register(address,MPU9250_GYRO_YOUT_L,byteptr);
+    gy = ((int16_t) readbyte) | gy;
+
+    // Gyro Z
+    i2c_read_register(address,MPU9250_GYRO_ZOUT_H,byteptr);
+    gz = ((int16_t) readbyte) << 8;
+
+    i2c_read_register(address,MPU9250_GYRO_ZOUT_L,byteptr);
+    gz = ((int16_t) readbyte) | gz;
+
+    timestamp = TimerValueGet(GPTIMER2_BASE, GPTIMER_A);
+
+    x = ((double) ax) / 16000.0; y = ((double) ay) / 16000.0; z = ((double) az) / 16000.0;
+    accel[0] = ax; accel[1] = ay; accel[2] = az; // TODO: debias from gravity using gyro readings
+
+    imu_data[imu_samples][0] = ((double) ax) / 16000.0; imu_data[imu_samples][1] = ((double) ay) / 16000.0; imu_data[imu_samples][2] = ((double) az) / 16000.0;
+    imu_samples += 1;
+
+    if (imu_samples >= MAX_SAMPLES) {
+        IntDisable(gptmFallingEdgeInt);
+        imu_samples = 0; int _i;
+        for (_i = 0; _i < MAX_SAMPLES; _i += 1) {
+            test_count += 1;
+            mimsyPrintf("%d, %d, %d\r", (int) test_count, (int) (imu_data[_i][0] * 100000), (int) timestamp);
+        }
+        IntEnable(gptmFallingEdgeInt);
+    }
+}
+
+void complementary_filter(short accelData[3], short gyroData[3], double *pitch, double *roll, double dt)
+{
+    double pitch_acc, roll_acc;
+    
+    // crux of complementary filter, weight gyro data vs. accel data
+    double W_GYRO = 0.98;
+    double W_ACCEL = 1 - W_GYRO; 
+
+    // sensitivity = -16 to 16 G at 16Bit -> 16G = 262144 && 0.5G = 8192;
+    double LOW_THRESH = 0.5 * ACCEL_SENS; double HIGH_THRESH = 16 * ACCEL_SENS;      
+
+    // Integrate the gyroscope data -> int(angularSpeed) = angle
+    *pitch += ((double) gyroData[0] / GYRO_SENS) * dt;
+    *roll -= ((double) gyroData[1] / GYRO_SENS) * dt;
+
+    // compensate for drift with accelerometer data if !bullshit
+    int accel_check = abs(accelData[0]) + abs(accelData[1]) + abs(accelData[2]);
+    if (accel_check > LOW_THRESH && accel_check < HIGH_THRESH) {
+        pitch_acc = my_atan2(((double) accelData[1]), ((double) accelData[2])) * 180 / PI;
+        roll_acc = my_atan2(((double) accelData[0]), ((double) accelData[2])) * 180 / PI;
+
+        *pitch = *pitch * W_GYRO + pitch_acc * W_ACCEL;
+        *roll = *roll * W_GYRO + roll_acc * W_ACCEL;
+        // pitch_acc = my_atan2((double) W_GYRO, (double) W_GYRO);
+    }
+}
 
 void precision_timers_init(void){
     // SysCtrlPeripheralEnable(SYS_CTRL_PERIPH_GPT0); // enables timer0 module
@@ -217,42 +818,42 @@ void input_edge_timers_init(void) {
 
     IntMasterEnable();
 
-    TimerEnable(gptmEdgeTimerBase,GPTIMER_BOTH);
+    TimerEnable(gptmEdgeTimerBase, GPTIMER_BOTH);
 
     TimerSynchronize(GPTIMER0_BASE, GPTIMER_3A_SYNC | GPTIMER_3B_SYNC); // for 2 diodes, sync logical or of GPTIMER_2A_SYNC and these two with GPTIMER0_BASE as base??? check if we get same functionality hmmmm
 }
 
-float get_period_us_32(uint32_t start, uint32_t end) {
+double get_period_us_32(uint32_t start, uint32_t end) {
     if (start > end) {
         // do overflow arithmetic
-        return ((float) (end + (timer_cnt_32 - start))) / CLOCK_SPEED_MHZ;
+        return ((double) (end + (timer_cnt_32 - start))) / CLOCK_SPEED_MHZ;
     } else {
-        return ((float) (end - start)) / CLOCK_SPEED_MHZ;
+        return ((double) (end - start)) / CLOCK_SPEED_MHZ;
     }
 }
 
-float get_period_us(uint32_t start, uint32_t end) {
+double get_period_us(uint32_t start, uint32_t end) {
     if (start > end) {
         // do overflow arithmetic
-        return ((float) (end + (timer_cnt_24 - start))) / CLOCK_SPEED_MHZ;
+        return ((double) (end + (timer_cnt_24 - start))) / CLOCK_SPEED_MHZ;
     } else {
-        return ((float) (end - start)) / CLOCK_SPEED_MHZ;
+        return ((double) (end - start)) / CLOCK_SPEED_MHZ;
     }
 }
 
 /** Returns a number defining our 3 information bits: skip, data, axis.
   Given by our pulse length in microseconds (us). */
-unsigned short int sync_bits(float duration) {
+unsigned short int sync_bits(double duration) {
   return (unsigned short int) (48*duration - 2501) / 500;
 }
 
-float distance_fit_horiz(float time_us) {
-  float E = 0.2218; float c0 = -0.3024; float c1 = 18.2991;
+double distance_fit_horiz(double time_us) {
+  double E = 0.2218; double c0 = -0.3024; double c1 = 18.2991;
   return E + c1 / (time_us - c0 * sweep_velocity);
 }
 
-float distance_fit_vert(float time_us) {
-  float E = 0.3074; float c0 = 0.9001; float c1 = 16.1908;
+double distance_fit_vert(double time_us) {
+  double E = 0.3074; double c0 = 0.9001; double c1 = 16.1908;
   return E + c1 / (time_us - c0 * sweep_velocity);
 }
 
@@ -268,10 +869,10 @@ location_t localize_mimsy(pulse_t *pulses_local) {
     Pulses valid_seq_b[4] = { Sync, Vert, Sync, Horiz };
     uint8_t sweep_axes_check = 0; uint8_t i;
     for (i = 0; i < PULSE_TRACK_COUNT; i++) {
-        float period = get_period_us(pulses_local[i].rise, pulses_local[i].fall);
+        double period = get_period_us(pulses_local[i].rise, pulses_local[i].fall);
         if (period < MIN_SYNC_PERIOD_US) { // sweep pulse
             if (init_sync_index != PULSE_TRACK_COUNT) {
-                float parent_period = get_period_us(pulses_local[i-1].rise, pulses_local[i-1].fall);
+                double parent_period = get_period_us(pulses_local[i-1].rise, pulses_local[i-1].fall);
                 int axis = (sync_bits(parent_period) & 0b001) + 1;
                 pulses_local[i].type = axis; // 2 if horizontal, 1 if vertical
 
@@ -279,7 +880,7 @@ location_t localize_mimsy(pulse_t *pulses_local) {
                 if (axis == ((int) valid_seq_a[ind]) || axis == ((int) valid_seq_b[ind])) {
                     sweep_axes_check += axis; // check for 1 horizontal, 1 vertical sweep
                 } else {
-                    broken1 += 1;
+                    broken2 += 1;
                     return loc;
                 }
             }
@@ -296,7 +897,7 @@ location_t localize_mimsy(pulse_t *pulses_local) {
     }
 
     if (init_sync_index == PULSE_TRACK_COUNT || sweep_axes_check != 3) {
-        broken3 += 1;
+        broken3 = sweep_axes_check; broken1 += 1;
         return loc;
     }
 
@@ -325,9 +926,7 @@ location_t localize_mimsy(pulse_t *pulses_local) {
     return loc;
 }
 
-void configure_pins(void){ // TODO: set to do lighthouse setup
-    // localize and store
-    modular_ptr = 0; pulse_count = 0; samples = 0; test_count = 0;
+void configure_pins(void){
     // initialize edges
     unsigned short int i;
     for (i = 0; i < PULSE_TRACK_COUNT; i++) {
@@ -405,6 +1004,9 @@ int mote_main(void) {
 
     moving_right = true;
     transmitting = false;
+    finished = false;
+
+    modular_ptr = 0; pulse_count = 0; samples = 0; test_count = 0;
 
     azimuth = 0.0;
     broken1 = 0; broken2 = 0; broken3 = 0; ekf_fail = 0;
@@ -428,6 +1030,27 @@ int mote_main(void) {
 
     // initialize board
     board_init();
+    imu_init();
+    configure_pins();
+
+    uartMimsyInit();
+
+    x = 0; y = 0; z = 0;
+
+    while (true) {
+        // lighthouse
+    }
+
+    while (!finished) {
+        while (!imu_ready) {
+            // wait for new IMU update
+        }
+        int accel[3]; int timestamp;
+        get_scalar_accel(accel, &timestamp);
+        imu_ready = false;
+    }
+
+    return;
 
     // add callback functions radio
     radio_setStartFrameCb(cb_startFrame);
@@ -556,6 +1179,13 @@ int mote_main(void) {
     }
 }
 
+double reduce_digits(double f, int num) {
+    if (num == 0) {
+        return f;
+    }
+    return reduce_digits((f - ((double)((int) f)))*10, num-1);
+}
+
 //=========================== callbacks =======================================
 void pulse_handler_gpio_a(void) {
     TimerIntClear(gptmEdgeTimerBase, gptmFallingEdgeEvent);
@@ -589,7 +1219,20 @@ void pulse_handler_gpio_a(void) {
         valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = loc.theta;
         azimuth = loc.phi * 180/PI; elevation = loc.theta * 180/PI;
 
-        samples += 1; if (samples == MAX_SAMPLES) samples = 0;
+        samples += 1;
+        if (samples >= MAX_SAMPLES) {
+            IntDisable(gptmFallingEdgeInt);
+            samples = 0; int _i;
+            for (_i = 0; _i < MAX_SAMPLES; _i += 1) {
+                test_count += 1;
+                double az = valid_angles[_i][0];
+                int d0 = (int) (reduce_digits(az, 0) * 100000);
+                int d1 = (int) (reduce_digits(az, 5) * 100000);
+                int d2 = (int) (reduce_digits(az, 10) * 100000);
+                mimsyPrintf("%d, %d, %d, %d\r", (int) test_count, d0, d1, d2);
+            }
+            IntEnable(gptmFallingEdgeInt);
+        }
     }
 }
 
@@ -607,4 +1250,88 @@ void cb_endFrame(PORT_TIMER_WIDTH timestamp) {
    
    // update debug stats
    app_dbg.num_endFrame++;
+}
+
+void cb_timer(void) {
+   // set flag
+   imu_ready = true;
+   
+   sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
+}
+
+//=============================== flash ==========================================
+
+/*This function writes a full 2048 KB page-worth of data to flash.
+  Parameters:
+    CalibData data[]: pointer to array of CalibData structures that are to be written to flash
+    uint32_t size: size of data[] in number of CalibData structures
+    uint32_t startPage: Flash page where data is to be written
+    CalibDataCard *card: pointer to an CalibDataCard where the function will record
+      which page the data was written to and which timestamps on the data are included
+ */
+void flashWriteCalib(CalibData data[],uint32_t size, uint32_t startPage,int wordsWritten){
+  uint32_t pageStartAddr = FLASH_BASE + (startPage * PAGE_SIZE); // page base address
+  int32_t i32Res;
+
+  uint32_t structNum = size;
+
+  // mimsyPrintf("\n Flash Page Address: %x",pageStartAddr);
+  if (wordsWritten == 0){
+	  i32Res = FlashMainPageErase(pageStartAddr); // erase page so there it can be written to
+  }
+
+  // mimsyPrintf("\n Flash Erase Status: %d",i32Res);
+  for (uint32_t i = 0; i < size; i++){
+    uint32_t* wordified_data=data[i].bits; //retrieves the int32 array representation of the PulseData struct
+    IntMasterDisable(); //disables interrupts to prevent the write operation from being messed up
+    i32Res = FlashMainPageProgram(wordified_data, pageStartAddr+i*CALIB_DATA_STRUCT_SIZE+wordsWritten*4, CALIB_DATA_STRUCT_SIZE); //write struct to flash
+    IntMasterEnable();//renables interrupts
+    // mimsyPrintf("\n Flash Write Status: %d",i32Res);
+   }
+
+   // update card with location information
+   // card->page=startPage;
+   // card->startTime=data[0].fields.timestamp;
+   // card->endTime=data[size-1].fields.timestamp;
+
+}
+
+/*This function reads a page worth of CalibData from flash.
+  Parameters:
+    CalibDataCard card: The CalibDataCard that corresponds to the data that you want to read from flash
+    CalibData * dataArray: pointer that points to location of data array that you want the read operation to be written to
+    uint32_t size: size of dataArray in number of CalibData structures
+*/
+void flashReadCalib(CalibDataCard card, CalibData * dataArray, uint32_t size){
+
+  uint32_t pageAddr=FLASH_BASE+card.page*PAGE_SIZE;
+
+  for(uint32_t i=0;i<size;i++){
+    for(uint32_t j=0;j<CALIB_DATA_STRUCT_SIZE/4;j++){
+      IntMasterDisable();
+      dataArray[i].bits[j] = FlashGet(pageAddr+i*CALIB_DATA_STRUCT_SIZE+j*4);
+      IntMasterEnable();
+    }
+  }
+
+}
+
+/*This function reads a page worth of CalibData from flash.
+  Parameters:
+    CalibDataCard card: The CalibDataCard that corresponds to the data that you want to read from flash
+    CalibData * dataArray: pointer that points to location of data array that you want the read operation to be written to
+    uint32_t size: size of dataArray in number of CalibData structures
+*/
+void flashReadCalibSection(CalibDataCard card, CalibData * dataArray, uint32_t size, int wordsRead){
+
+  uint32_t pageAddr=FLASH_BASE+card.page*PAGE_SIZE;
+
+  for(uint32_t i=0;i<size;i++){
+    for(uint32_t j=0;j<CALIB_DATA_STRUCT_SIZE/4;j++){
+       IntMasterDisable();
+       dataArray[i].bits[j]=FlashGet(pageAddr+i*CALIB_DATA_STRUCT_SIZE+j*4+wordsRead*4);
+       IntMasterEnable();
+    }
+  }
+
 }

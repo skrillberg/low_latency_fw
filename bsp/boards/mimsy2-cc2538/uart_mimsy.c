@@ -9,14 +9,14 @@
 #include "sys_ctrl.h"
 #include "gpio.h"
 
-#define EXAMPLE_PIN_UART_RXD            GPIO_PIN_1
+#define EXAMPLE_PIN_UART_RXD            GPIO_PIN_0
 #define EXAMPLE_PIN_UART_TXD            GPIO_PIN_2
-#define EXAMPLE_GPIO_BASE               GPIO_A_BASE
+#define EXAMPLE_GPIO_BASE               GPIO_D_BASE
 
 
 void uartMimsyInit(){
   
-       char cThisChar;
+    char cThisChar;
 
     //
     // Set the clocking to run directly from the external crystal/oscillator.
@@ -63,13 +63,12 @@ void uartMimsyInit(){
    // UARTConfigSetExpClk(UART0_BASE, SysCtrlClockGet(), 115200,
                      //   (UART_CONFIG_WLEN_8 | UART_CONFIG_STOP_ONE |
                      //    UART_CONFIG_PAR_NONE));
-  //  UARTEnable(UART0_BASE);
+    // UARTEnable(UART0_BASE);
     UARTStdioInitExpClk(0,115200*2); //adjusted to account for clock difference caused by openwsn clock scheme
     //
     // Put a character to show start of example.  This will display on the
     // terminal.
-    //  
-  
+    // 
 
 }
 
