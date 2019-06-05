@@ -9,9 +9,13 @@
 #include "sys_ctrl.h"
 #include "gpio.h"
 
-#define EXAMPLE_PIN_UART_RXD            GPIO_PIN_0
-#define EXAMPLE_PIN_UART_TXD            GPIO_PIN_2
-#define EXAMPLE_GPIO_BASE               GPIO_D_BASE
+//#define EXAMPLE_PIN_UART_RXD            GPIO_PIN_0
+//#define EXAMPLE_PIN_UART_TXD            GPIO_PIN_2
+//#define EXAMPLE_GPIO_BASE               GPIO_D_BASE
+
+#define EXAMPLE_PIN_UART_RXD            GPIO_PIN_2
+#define EXAMPLE_PIN_UART_TXD            GPIO_PIN_5
+#define EXAMPLE_GPIO_BASE               GPIO_A_BASE
 
 
 void uartMimsyInit(){

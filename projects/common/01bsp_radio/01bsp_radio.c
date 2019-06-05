@@ -47,9 +47,10 @@ end of frame event), it will turn on its error LED.
 //=========================== defines =========================================
 
 #define LENGTH_PACKET   8+LENGTH_CRC ///< maximum length is 127 bytes --> TODO: use 100
+#define OLD_LENGTH_PACKET 8+LENGTH_CRC
 #define CHANNEL         16             ///< 11=2.405GHz
 #define TX_CHANNEL	16	       /// tx channel of individual mote
-#define TIMER_PERIOD    0xff         ///< 0xff = 125 Hz
+#define TIMER_PERIOD    0xff         ///< 0xff = 125 Hz < 0x7fff = 1 Hz
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
 #define NUM_ATTEMPTS	3	       ///<number of times packet is resent, needs to match number of motes for multichan experiments
@@ -69,8 +70,8 @@ end of frame event), it will turn on its error LED.
 #define CLOCK_SPEED_MHZ 32.0f
 #define MAX_SAMPLES 250
 
-#define LEFT_LIM -1.8f
-#define RIGHT_LIM 1.8f
+#define LEFT_LIM 1.601823580621385f
+#define RIGHT_LIM 1.5278037261196f
 
 #define DT 1.0f // FIXME: figure out kalman time step in us?
 #define IMU_ADDRESS 0x69
@@ -178,12 +179,10 @@ uint32_t ekf_fail;
 
 static const double sweep_velocity = PI / SWEEP_PERIOD_US;
 
-double imu_data[MAX_SAMPLES][3];
-uint8_t imu_samples;
 bool imu_ready;
 double x; double y; double z;
 
-volatile double valid_angles[MAX_SAMPLES][2];
+volatile double valid_angles[MAX_SAMPLES];
 volatile pulse_t pulses[PULSE_TRACK_COUNT];
 volatile uint8_t modular_ptr;
 volatile uint8_t pulse_count;
@@ -194,6 +193,7 @@ volatile uint32_t broken2;
 volatile uint32_t broken3;
 
 uint32_t test_count;
+uint32_t estimate_transmit_count;
 
 //=========================== prototypes ======================================
 
@@ -626,12 +626,18 @@ float my_sqrt(float square)
     return root;
 }
 
+double reduce_digits(double f, int num) {
+    if (num == 0) {
+        return f;
+    }
+    return reduce_digits((f - ((double)((int) f)))*10, num-1);
+}
+
 //======================================START===========================================
 
 void imu_init(void) {
     // initialize IMU
     imu_ready = false;
-    imu_samples = 0;
 
     // start bsp timer
     sctimer_set_callback(cb_timer);
@@ -717,19 +723,6 @@ void get_scalar_accel(uint16_t *accel, uint32_t *timestamp) { // FIXME: put back
 
     x = ((double) ax) / 16000.0; y = ((double) ay) / 16000.0; z = ((double) az) / 16000.0;
     accel[0] = ax; accel[1] = ay; accel[2] = az; // TODO: debias from gravity using gyro readings
-
-    imu_data[imu_samples][0] = ((double) ax) / 16000.0; imu_data[imu_samples][1] = ((double) ay) / 16000.0; imu_data[imu_samples][2] = ((double) az) / 16000.0;
-    imu_samples += 1;
-
-    if (imu_samples >= MAX_SAMPLES) {
-        IntDisable(gptmFallingEdgeInt);
-        imu_samples = 0; int _i;
-        for (_i = 0; _i < MAX_SAMPLES; _i += 1) {
-            test_count += 1;
-            mimsyPrintf("%d, %d, %d\r", (int) test_count, (int) (imu_data[_i][0] * 100000), (int) timestamp);
-        }
-        IntEnable(gptmFallingEdgeInt);
-    }
 }
 
 void complementary_filter(short accelData[3], short gyroData[3], double *pitch, double *roll, double dt)
@@ -921,7 +914,7 @@ void configure_pins(void){
     // initialize angle array
     uint32_t j;
     for (j = 0; j < MAX_SAMPLES; j++) {
-        valid_angles[j][0] = 0; valid_angles[j][1] = 0;
+        valid_angles[j] = 0;
     }
 
     volatile uint32_t _i;
@@ -979,7 +972,7 @@ void configure_ekf(ekf_t * ekf) {
     ekf->x[1] = 0; // velocity
 } COMMENT */
 
-void precision_timer_init(void){
+void global_timer_init(void){
     SysCtrlPeripheralEnable(SYS_CTRL_PERIPH_GPT1); // enables timer module
 
     TimerConfigure(gptmTimerBase, GPTIMER_CFG_PERIODIC_UP); // configures timers
@@ -999,7 +992,7 @@ int mote_main(void) {
     transmitting = false;
     finished = false;
 
-    modular_ptr = 0; pulse_count = 0; samples = 0; test_count = 0;
+    modular_ptr = 0; pulse_count = 0; samples = 0; test_count = 0; estimate_transmit_count = 0;
 
     azimuth = 0.0;
     broken1 = 0; broken2 = 0; broken3 = 0; ekf_fail = 0;
@@ -1044,6 +1037,11 @@ int mote_main(void) {
         imu_ready = false;
     } */
 
+    // start bsp timer
+    sctimer_set_callback(cb_timer);
+    sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
+    sctimer_enable();
+
     // add callback functions radio
     radio_setStartFrameCb(cb_startFrame);
     radio_setEndFrameCb(cb_endFrame);
@@ -1065,16 +1063,17 @@ int mote_main(void) {
     // configure localization interrupt timing scheme
     configure_pins();
 
-    
-
     // TODO: what's up with this???
     // HWREG(RFCORE_XREG_RXENABLE) = 0; //disable rx
-    // HWREG(RFCORE_XREG_FRMCTRL1)    = HWREG(RFCORE_XREG_FRMCTRL1) & 0b110; //prevents stxon instruction from enabling rx, this is really important because it prevents tx motes from ever receiving anything
+    // HWREG(RFCORE_XREG_FRMCTRL1) = HWREG(RFCORE_XREG_FRMCTRL1) & 0b110; //prevents stxon instruction from enabling rx, this is really important because it prevents tx motes from ever receiving anything
    
     app_vars.flags &= ~APP_FLAG_TIMER; app_vars.flags &= ~APP_FLAG_START_FRAME; app_vars.flags &= ~APP_FLAG_END_FRAME;
 
+    bool send_est = false;
+    bool control_flag = false;
+    double pos; // TODO: make sure you're not overwriting when sending estimate
     while (true) {
-        if (new_data && !transmitting) {
+        if (new_data && !transmitting) {// TODO: still update ekf/position estimate when transmitting??? move if transmitting return inside
             new_data = false;
             /* model(&ekf, accel, azimuth, update);
 
@@ -1086,18 +1085,107 @@ int mote_main(void) {
                 update = false;
             } */
 
-            // led
-            leds_sync_on();
-
             // TODO: update positions & ignore velocities     
             // double pos = ekf.x[0];
-            double pos = azimuth * 180/PI;
-            if ((moving_right && (pos >= RIGHT_LIM)) || (!moving_right && (pos <= LEFT_LIM))) {
-                transmitting = true;
+            pos = azimuth;
+
+            // send packet with azimuth data
+
+            if ((moving_right && (pos <= RIGHT_LIM)) || (!moving_right && (pos >= LEFT_LIM))) { // test with atan(LEFT_LIM_m), r_l_m
+                transmitting = true; control_flag = true;
                 app_vars.flags |= APP_FLAG_TIMER;
                 rx_packet_count += 1;
             }
+
+            if (imu_ready && !send_est) { // TODO: set flag here and do if statement on outer that handles ground truth transmission (don't break direction switch state machine while you're at it --> if most recent pos >= LIM, send switch signal with priority)
+                                    // TODO: while emptying this array, start filling another one with new pose data, and when done, copy over and empty that one (assume transmission is quick so you can disable interrupts when transmitting --> won't lose too many pulses, if any, I hope)
+                imu_ready = false;
+                send_est = true;
+                // TODO: make second timer for IMU reading that's different s.t. position transmissions only come on specified interval
+                // TODO: or actually just make it so that whenever array count is above 200 or sth you start sending shit
+            }
         }
+
+        if (!control_flag && send_est && !transmitting) { // if control_flag set, wait till next round to transmit
+            send_est = false; // if array done being emptied, else keep going
+            // led's on
+            leds_all_on(); // TODO: move later
+            app_vars.flags |= APP_FLAG_TIMER;
+
+            // should transmit pose
+            IntDisable(gptmFallingEdgeInt);
+
+            radio_rfOn();
+            radio_setFrequency(CHANNEL); // multichannel
+            radio_rfOff();
+
+            // split double into 8 pairs of two digits
+            // (i.e. 3.141592653589793 --> 31, 41, 59, 26, 53, 58, 97, 93)
+            // and send over TxChannel
+
+            uint8_t d[8]; uint8_t offset = 0;
+            d[offset + 0] = (uint8_t) (reduce_digits(pos, 0) * 10);
+            d[offset + 1] = (uint8_t) (reduce_digits(pos, 2) * 10);
+            d[offset + 2] = (uint8_t) (reduce_digits(pos, 4) * 10);
+            d[offset + 3] = (uint8_t) (reduce_digits(pos, 6) * 10);
+            d[offset + 4] = (uint8_t) (reduce_digits(pos, 8) * 10);
+            d[offset + 5] = (uint8_t) (reduce_digits(pos, 10) * 10);
+            d[offset + 6] = (uint8_t) (reduce_digits(pos, 12) * 10);
+            d[offset + 7] = (uint8_t) (reduce_digits(pos, 14) * 10);
+
+            /* uint8_t d[8*10]; uint8_t offset;
+            for (i = 0; i < 10; i += 1) {
+                offset = 8*i;
+                d[offset + 0] = (uint8_t) (reduce_digits(pos, 0) * 10);
+                d[offset + 1] = (uint8_t) (reduce_digits(pos, 2) * 10);
+                d[offset + 2] = (uint8_t) (reduce_digits(pos, 4) * 10);
+                d[offset + 3] = (uint8_t) (reduce_digits(pos, 6) * 10);
+                d[offset + 4] = (uint8_t) (reduce_digits(pos, 8) * 10);
+                d[offset + 5] = (uint8_t) (reduce_digits(pos, 10) * 10);
+                d[offset + 6] = (uint8_t) (reduce_digits(pos, 12) * 10);
+                d[offset + 7] = (uint8_t) (reduce_digits(pos, 14) * 10);
+            } */
+
+            // prepare packet. This loads the 32bit counter into the packet
+            app_vars.packet_len = sizeof(app_vars.packet);
+            for (i=0;i<app_vars.packet_len;i++) {
+                app_vars.packet[i] = d[i];
+            }
+
+            // start transmitting packet
+            radio_loadPacket(app_vars.packet,app_vars.packet_len);
+            radio_txEnable();
+            radio_txNow();
+
+            // clear flag
+            app_vars.flags &= ~APP_FLAG_TIMER;
+
+            IntEnable(gptmFallingEdgeInt);
+
+            // led's off
+            leds_all_off(); // TODO: move later
+            
+            /* samples += 1;
+            if (samples >= MAX_SAMPLES) { // write to flash
+
+                IntDisable(gptmFallingEdgeInt);
+
+                samples = 0; int _i;
+                for (_i = 0; _i < MAX_SAMPLES; _i += 1) {
+                    test_count += 1;
+                    double az = valid_angles[_i][0];
+                    int d0 = (int) (reduce_digits(az, 0) * 10000);
+                    int d1 = (int) (reduce_digits(az, 5) * 10000);
+
+                    int d2 = (int) (reduce_digits(az, 10) * 10000);
+                    // mimsyPrintf("%d, %d, %d, %d\r", (int) test_count, d0, d1, d2);
+                    // TODO: write to flash
+                }
+                IntEnable(gptmFallingEdgeInt);
+
+            } */
+        }
+
         //==== APP_FLAG_START_FRAME (TX or RX)
         if (app_vars.flags & APP_FLAG_START_FRAME) {
             // start of frame
@@ -1120,7 +1208,7 @@ int mote_main(void) {
                     radio_rfOff();
                     app_vars.flags |= APP_FLAG_TIMER;
                 } else { // done transmitting
-                    tx_count = 0; transmitting = false;
+                    tx_count = 0; transmitting = false; control_flag = false;
                     // change motion state
                     moving_right = !moving_right;
                     IntEnable(gptmFallingEdgeInt);
@@ -1175,13 +1263,6 @@ int mote_main(void) {
     }
 }
 
-double reduce_digits(double f, int num) {
-    if (num == 0) {
-        return f;
-    }
-    return reduce_digits((f - ((double)((int) f)))*10, num-1);
-}
-
 //=========================== callbacks =======================================
 void pulse_handler_gpio_a(void) {
     TimerIntClear(gptmEdgeTimerBase, gptmFallingEdgeEvent);
@@ -1210,21 +1291,22 @@ void pulse_handler_gpio_a(void) {
         location_t loc = localize_mimsy(pulses_local);
         if (!loc.valid) { test_count += 1; return; }
 
-        azimuth = PI/2.0 - loc.phi; new_data = true; update = true;
+        azimuth = loc.phi; new_data = true; update = true;
 
-        valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = loc.theta;
+        valid_angles[(int)samples] = loc.phi; // valid_angles[(int)samples][1] = loc.theta;
         elevation = azimuth * 180/PI;
 
-        /*samples += 1;
+        /*
+        samples += 1;
         if (samples >= MAX_SAMPLES) { // write to flash
             IntDisable(gptmFallingEdgeInt);
             samples = 0; int _i;
             for (_i = 0; _i < MAX_SAMPLES; _i += 1) {
                 test_count += 1;
                 double az = valid_angles[_i][0];
-                int d0 = (int) (reduce_digits(az, 0) * 100000);
-                int d1 = (int) (reduce_digits(az, 5) * 100000);
-                int d2 = (int) (reduce_digits(az, 10) * 100000);
+                int d0 = (int) (reduce_digits(az, 0) * 10000);
+                int d1 = (int) (reduce_digits(az, 5) * 10000);
+                int d2 = (int) (reduce_digits(az, 10) * 10000);
                 // mimsyPrintf("%d, %d, %d, %d\r", (int) test_count, d0, d1, d2);
                 // TODO: write to flash
             }

@@ -135,6 +135,7 @@ int mote_main(void) {
    
    // setup UART
    // uart_setCallbacks(cb_uartTxDone,cb_uartRxCb);
+    uartMimsyInit();
    
    // prepare radio
    radio_rfOn();
@@ -183,7 +184,7 @@ int mote_main(void) {
 //	  packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xBD) && (app_vars.rxpk_buf[5] == 0xBD)  && (app_vars.rxpk_buf[6] == 0xB6) && (app_vars.rxpk_buf[7] == 0xC2));
 	  if(packet_valid){
 		//set left output pin high
-	  if((app_vars.rxpk_buf[0] == 0xFF)){
+	  if((app_vars.rxpk_buf[0] == 0xFF)){ // FIXME: why one of these isn't lighting up...
 				leds_sync_on();
 				GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
 				GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
@@ -211,6 +212,12 @@ int mote_main(void) {
 	   memset(&app_vars,0,sizeof(app_vars_t));
 //	   GPIOPinWrite(GPIO_A_BASE,GPIO_PIN_2,0);
 
+   } else {
+        mimsyPrintf("%d, %d, %d, %d, %d, %d, %d, %d\r", app_vars.rxpk_buf[0], app_vars.rxpk_buf[1],
+                                        app_vars.rxpk_buf[2], app_vars.rxpk_buf[3],
+                                        app_vars.rxpk_buf[4], app_vars.rxpk_buf[5],
+                                        app_vars.rxpk_buf[6], app_vars.rxpk_buf[7]
+                                        ); // TODO: add timestamp
    }
    }
 }
