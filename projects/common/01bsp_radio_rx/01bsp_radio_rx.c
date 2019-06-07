@@ -72,6 +72,10 @@ len=17  num=84  rssi=-81  lqi=108 crc=1
 #include "uart.h"
 #include "sctimer.h"
 #include <headers/hw_memmap.h>
+#include <headers/hw_sys_ctrl.h>
+#include <headers/hw_gptimer.h>
+#include <source/gptimer.h>
+#include <source/sys_ctrl.h>
 #include "source/gpio.h"
 
 //=========================== defines =========================================
@@ -115,111 +119,131 @@ void cb_radioTimerOverflows(void);
 void cb_startFrame(PORT_TIMER_WIDTH timestamp);
 void cb_endFrame(PORT_TIMER_WIDTH timestamp);
 
+static const uint32_t gptmTimerBase = GPTIMER3_BASE;
+static const uint32_t timer_cnt_32 = 0xFFFFFFFF;
 
 //=========================== main ============================================
+
+void global_timer_init(void){
+    SysCtrlPeripheralEnable(SYS_CTRL_PERIPH_GPT3); // enables timer module
+
+    TimerConfigure(gptmTimerBase, GPTIMER_CFG_PERIODIC_UP); // configures timers
+    TimerLoadSet(gptmTimerBase,GPTIMER_A,timer_cnt_32);
+
+    TimerEnable(gptmTimerBase,GPTIMER_A);
+}
 
 /**
 \brief The program starts executing here.
 */
 int mote_main(void) {
-   int i=0;
-   // clear local variables
-   memset(&app_vars,0,sizeof(app_vars_t));
-   
-   // initialize board
-   board_init();
+    int i=0;
+    // clear local variables
+    memset(&app_vars,0,sizeof(app_vars_t));
 
-   // add callback functions radio
-   radio_setStartFrameCb(cb_startFrame);
-   radio_setEndFrameCb(cb_endFrame);
-   
-   // setup UART
-   // uart_setCallbacks(cb_uartTxDone,cb_uartRxCb);
+    // initialize board
+    board_init();
+    global_timer_init();
+
+    // add callback functions radio
+    radio_setStartFrameCb(cb_startFrame);
+    radio_setEndFrameCb(cb_endFrame);
+
+    // setup UART
+    // uart_setCallbacks(cb_uartTxDone,cb_uartRxCb);
     uartMimsyInit();
-   
-   // prepare radio
-   radio_rfOn();
-   radio_setFrequency(CHANNEL);
-   
-   // switch in RX
-   radio_rxEnable();
-   uint8_t packet[10] = {0,0,0,0,0,0,0,0,0,0};
-   radio_loadPacket(packet,LENGTH_PACKET);
-   radio_txEnable();
-   radio_txNow();
- 	int packet_valid;
 
-   while (1) {
-	   /*Added by SY*/
-//	   memset(&app_vars,0,sizeof(app_vars_t));
-	   packet_valid = 0;
-      int j = 0;
-      // sleep while waiting for at least one of the rxpk_done to be set
-      app_vars.rxpk_done = 0;
-      while (app_vars.rxpk_done==0) {
-       // leds_debug_on();
-      }
-      
-      // if I get here, I just received a packet
-      
-      //===== send notification over serial port
-      
-      // led
-      leds_error_on();
-      
-      // format frame to send over serial port
-      app_vars.uart_txFrame[0] = app_vars.rxpk_len;  // packet length
-      app_vars.uart_txFrame[1] = app_vars.rxpk_num;  // packet number
-      app_vars.uart_txFrame[2] = app_vars.rxpk_rssi; // RSSI
-      app_vars.uart_txFrame[3] = app_vars.rxpk_lqi;  // LQI
-      app_vars.uart_txFrame[4] = app_vars.rxpk_crc;  // CRC
-      app_vars.uart_txFrame[5] = 0xff;               // closing flag
-      app_vars.uart_txFrame[6] = 0xff;               // closing flag
-      app_vars.uart_txFrame[7] = 0xff;               // closing flag
-      
-      app_vars.uart_done          = 0;
-      app_vars.uart_lastTxByte    = 0;
+    // prepare radio
+    radio_rfOn();
+    radio_setFrequency(CHANNEL);
 
-      packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xAC) && (app_vars.rxpk_buf[5] == 0xAC)  && (app_vars.rxpk_buf[6] == 0xA5) && (app_vars.rxpk_buf[7] == 0xB1));
-//	  packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xBD) && (app_vars.rxpk_buf[5] == 0xBD)  && (app_vars.rxpk_buf[6] == 0xB6) && (app_vars.rxpk_buf[7] == 0xC2));
-	  if(packet_valid){
-		//set left output pin high
-	  if((app_vars.rxpk_buf[0] == 0xFF)){ // FIXME: why one of these isn't lighting up...
-				leds_sync_on();
-				GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
-				GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
-				for(j=0;j<50000;j++){
-				}
-	  }
+    // switch in RX
+    radio_rxEnable();
+    uint8_t packet[LENGTH_PACKET] = {0,0,0,0,0,0,0,0,0,0};
 
-        //set right output pin high
-		if((app_vars.rxpk_buf[0] == 0xAA)){
-			leds_debug_on();
-			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,GPIO_PIN_1);
-			GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
-			  for(j=0;j<50000;j++){
-			}
+    radio_loadPacket(packet, LENGTH_PACKET);
+    radio_txEnable();
+    radio_txNow();
+    int packet_valid;
 
-		}
+    bool first = true; uint32_t init_time = 0; uint32_t time = 0;
+
+    while (1) {
+        /*Added by SY*/
+        //	   memset(&app_vars,0,sizeof(app_vars_t));
+        packet_valid = 0;
+        int j = 0;
+        // sleep while waiting for at least one of the rxpk_done to be set
+        app_vars.rxpk_done = 0;
+        while (app_vars.rxpk_done==0) {
+        // leds_debug_on();
+        }
+        time = TimerValueGet(gptmTimerBase, GPTIMER_A) - init_time;
+        if (first) {
+            first = false;
+            init_time = time;
+            time = 0;
+        }
+
+        // if I get here, I just received a packet
+
+        //===== send notification over serial port
+
+        // led
+        leds_error_on();
+
+        // format frame to send over serial port
+        app_vars.uart_txFrame[0] = app_vars.rxpk_len;  // packet length
+        app_vars.uart_txFrame[1] = app_vars.rxpk_num;  // packet number
+        app_vars.uart_txFrame[2] = app_vars.rxpk_rssi; // RSSI
+        app_vars.uart_txFrame[3] = app_vars.rxpk_lqi;  // LQI
+        app_vars.uart_txFrame[4] = app_vars.rxpk_crc;  // CRC
+        app_vars.uart_txFrame[5] = 0xff;               // closing flag
+        app_vars.uart_txFrame[6] = 0xff;               // closing flag
+        app_vars.uart_txFrame[7] = 0xff;               // closing flag
+
+        app_vars.uart_done          = 0;
+        app_vars.uart_lastTxByte    = 0;
+
+        packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xAC) && (app_vars.rxpk_buf[5] == 0xAC)  && (app_vars.rxpk_buf[6] == 0xA5) && (app_vars.rxpk_buf[7] == 0xB1));
+        //	  packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xBD) && (app_vars.rxpk_buf[5] == 0xBD)  && (app_vars.rxpk_buf[6] == 0xB6) && (app_vars.rxpk_buf[7] == 0xC2));
+        if(packet_valid){
+            //set left output pin high
+            if((app_vars.rxpk_buf[0] == 0xFF)){ // FIXME: why one of these isn't lighting up...
+                leds_sync_on();
+                GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
+                GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
+                for(j=0;j<50000;j++){
+                }
+            }
+
+            //set right output pin high
+            if((app_vars.rxpk_buf[0] == 0xAA)){
+                leds_debug_on();
+                GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,GPIO_PIN_1);
+                GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
+                for(j=0;j<50000;j++){
+                }
+            }
 
 
-	GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,0);
-	GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,0);
-	GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,0);
-      leds_error_off();
-	   /*Added by SY*/
-//      GPIOPinWrite(GPIO_A_BASE,GPIO_PIN_2,GPIO_PIN_2);
-	   memset(&app_vars,0,sizeof(app_vars_t));
-//	   GPIOPinWrite(GPIO_A_BASE,GPIO_PIN_2,0);
+            GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_1,0);
+            GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,0);
+            GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,0);
+            leds_error_off();
+            /*Added by SY*/
+            //      GPIOPinWrite(GPIO_A_BASE,GPIO_PIN_2,GPIO_PIN_2);
+            memset(&app_vars,0,sizeof(app_vars_t));
+            //	   GPIOPinWrite(GPIO_A_BASE,GPIO_PIN_2,0);
 
-   } else {
-        mimsyPrintf("%d, %d, %d, %d, %d, %d, %d, %d\r", app_vars.rxpk_buf[0], app_vars.rxpk_buf[1],
-                                        app_vars.rxpk_buf[2], app_vars.rxpk_buf[3],
-                                        app_vars.rxpk_buf[4], app_vars.rxpk_buf[5],
-                                        app_vars.rxpk_buf[6], app_vars.rxpk_buf[7]
-                                        ); // TODO: add timestamp
-   }
-   }
+        } else {
+            mimsyPrintf("%u, %d, %d, %d, %d, %d, %d, %d, %d\r", time, app_vars.rxpk_buf[0], app_vars.rxpk_buf[1],
+                        app_vars.rxpk_buf[2], app_vars.rxpk_buf[3],
+                        app_vars.rxpk_buf[4], app_vars.rxpk_buf[5],
+                        app_vars.rxpk_buf[6], app_vars.rxpk_buf[7]
+                        ); // TODO: store every 500 in a list and print it out
+        }
+    }
 }
 
 //=========================== callbacks =======================================

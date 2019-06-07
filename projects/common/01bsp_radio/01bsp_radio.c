@@ -50,7 +50,7 @@ end of frame event), it will turn on its error LED.
 #define OLD_LENGTH_PACKET 8+LENGTH_CRC
 #define CHANNEL         16             ///< 11=2.405GHz
 #define TX_CHANNEL	16	       /// tx channel of individual mote
-#define TIMER_PERIOD    0xff         ///< 0xff = 125 Hz < 0x7fff = 1 Hz
+#define TIMER_PERIOD    0x3ff         ///< 0xff ~ 125 Hz < 0x3ff ~ 30 Hz < 0x7fff ~ 1 Hz
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
 #define NUM_ATTEMPTS	3	       ///<number of times packet is resent, needs to match number of motes for multichan experiments
@@ -182,7 +182,7 @@ static const double sweep_velocity = PI / SWEEP_PERIOD_US;
 bool imu_ready;
 double x; double y; double z;
 
-volatile double valid_angles[MAX_SAMPLES];
+volatile double valid_angles[MAX_SAMPLES][2];
 volatile pulse_t pulses[PULSE_TRACK_COUNT];
 volatile uint8_t modular_ptr;
 volatile uint8_t pulse_count;
@@ -192,8 +192,11 @@ volatile uint32_t broken1;
 volatile uint32_t broken2;
 volatile uint32_t broken3;
 
-uint32_t test_count;
+volatile uint32_t test_count;
 uint32_t estimate_transmit_count;
+volatile uint32_t overflow_count;
+volatile uint32_t prev_time; volatile uint32_t time;
+volatile uint32_t init_time; volatile bool init_time_set;
 
 //=========================== prototypes ======================================
 
@@ -914,7 +917,7 @@ void configure_pins(void){
     // initialize angle array
     uint32_t j;
     for (j = 0; j < MAX_SAMPLES; j++) {
-        valid_angles[j] = 0;
+        valid_angles[j][0] = 0; valid_angles[j][1] = 0;
     }
 
     volatile uint32_t _i;
@@ -992,7 +995,8 @@ int mote_main(void) {
     transmitting = false;
     finished = false;
 
-    modular_ptr = 0; pulse_count = 0; samples = 0; test_count = 0; estimate_transmit_count = 0;
+    modular_ptr = 0; pulse_count = 0; samples = 0; test_count = 0;
+    estimate_transmit_count = 0; overflow_count = 0; time = 0; prev_time = 0; init_time = 0; init_time_set = false;
 
     azimuth = 0.0;
     broken1 = 0; broken2 = 0; broken3 = 0; ekf_fail = 0;
@@ -1062,6 +1066,7 @@ int mote_main(void) {
 
     // configure localization interrupt timing scheme
     configure_pins();
+    global_timer_init();
 
     // TODO: what's up with this???
     // HWREG(RFCORE_XREG_RXENABLE) = 0; //disable rx
@@ -1069,9 +1074,11 @@ int mote_main(void) {
    
     app_vars.flags &= ~APP_FLAG_TIMER; app_vars.flags &= ~APP_FLAG_START_FRAME; app_vars.flags &= ~APP_FLAG_END_FRAME;
 
+    bool first = false; bool enabled = true;
+
     bool send_est = false;
     bool control_flag = false;
-    double pos; // TODO: make sure you're not overwriting when sending estimate
+    double pos; uint32_t pos_time; // TODO: make sure you're not overwriting when sending estimate
     while (true) {
         if (new_data && !transmitting) {// TODO: still update ekf/position estimate when transmitting??? move if transmitting return inside
             new_data = false;
@@ -1087,7 +1094,7 @@ int mote_main(void) {
 
             // TODO: update positions & ignore velocities     
             // double pos = ekf.x[0];
-            pos = azimuth;
+            pos = azimuth; pos_time = time;
 
             // send packet with azimuth data
 
@@ -1108,12 +1115,11 @@ int mote_main(void) {
 
         if (!control_flag && send_est && !transmitting) { // if control_flag set, wait till next round to transmit
             send_est = false; // if array done being emptied, else keep going
-            // led's on
-            leds_all_on(); // TODO: move later
             app_vars.flags |= APP_FLAG_TIMER;
 
             // should transmit pose
             IntDisable(gptmFallingEdgeInt);
+            enabled = false;
 
             radio_rfOn();
             radio_setFrequency(CHANNEL); // multichannel
@@ -1123,7 +1129,7 @@ int mote_main(void) {
             // (i.e. 3.141592653589793 --> 31, 41, 59, 26, 53, 58, 97, 93)
             // and send over TxChannel
 
-            uint8_t d[8]; uint8_t offset = 0;
+            uint8_t d[8+5]; uint8_t offset = 0;
             d[offset + 0] = (uint8_t) (reduce_digits(pos, 0) * 10);
             d[offset + 1] = (uint8_t) (reduce_digits(pos, 2) * 10);
             d[offset + 2] = (uint8_t) (reduce_digits(pos, 4) * 10);
@@ -1132,6 +1138,12 @@ int mote_main(void) {
             d[offset + 5] = (uint8_t) (reduce_digits(pos, 10) * 10);
             d[offset + 6] = (uint8_t) (reduce_digits(pos, 12) * 10);
             d[offset + 7] = (uint8_t) (reduce_digits(pos, 14) * 10);
+
+            /* d[offset + 8] = (uint8_t) (((uint32_t) (pos_time / 100000000.0)) % 100);
+            d[offset + 9] = (uint8_t) (((uint32_t) (pos_time / 1000000.0)) % 100);
+            d[offset + 10] = (uint8_t) (((uint32_t) (pos_time / 10000.0)) % 100);
+            d[offset + 11] = (uint8_t) (((uint32_t) (pos_time / 100.0)) % 100);
+            d[offset + 12] = (uint8_t) (((uint32_t) (pos_time / 1.0)) % 100); */
 
             /* uint8_t d[8*10]; uint8_t offset;
             for (i = 0; i < 10; i += 1) {
@@ -1161,29 +1173,7 @@ int mote_main(void) {
             app_vars.flags &= ~APP_FLAG_TIMER;
 
             IntEnable(gptmFallingEdgeInt);
-
-            // led's off
-            leds_all_off(); // TODO: move later
-            
-            /* samples += 1;
-            if (samples >= MAX_SAMPLES) { // write to flash
-
-                IntDisable(gptmFallingEdgeInt);
-
-                samples = 0; int _i;
-                for (_i = 0; _i < MAX_SAMPLES; _i += 1) {
-                    test_count += 1;
-                    double az = valid_angles[_i][0];
-                    int d0 = (int) (reduce_digits(az, 0) * 10000);
-                    int d1 = (int) (reduce_digits(az, 5) * 10000);
-
-                    int d2 = (int) (reduce_digits(az, 10) * 10000);
-                    // mimsyPrintf("%d, %d, %d, %d\r", (int) test_count, d0, d1, d2);
-                    // TODO: write to flash
-                }
-                IntEnable(gptmFallingEdgeInt);
-
-            } */
+            enabled = true;
         }
 
         //==== APP_FLAG_START_FRAME (TX or RX)
@@ -1211,7 +1201,7 @@ int mote_main(void) {
                     tx_count = 0; transmitting = false; control_flag = false;
                     // change motion state
                     moving_right = !moving_right;
-                    IntEnable(gptmFallingEdgeInt);
+                    IntEnable(gptmFallingEdgeInt); enabled = true;
                     // tx_packet_count += 1;
                     // NOTE: incorporate Kalman velocity direction into this? prolly overkill bc shouldn't differ o/w undefined behavior
                 }
@@ -1223,7 +1213,7 @@ int mote_main(void) {
         //==== APP_FLAG_TIMER
         if (app_vars.flags & APP_FLAG_TIMER) {
             // should transmit pose
-            IntDisable(gptmFallingEdgeInt);
+            IntDisable(gptmFallingEdgeInt); enabled = false;
 
             if (tx_count == 0) {
                 radio_rfOn();
@@ -1293,25 +1283,28 @@ void pulse_handler_gpio_a(void) {
 
         azimuth = loc.phi; new_data = true; update = true;
 
-        valid_angles[(int)samples] = loc.phi; // valid_angles[(int)samples][1] = loc.theta;
+        time = TimerValueGet(gptmTimerBase, GPTIMER_A) - init_time;
+        time += 1; // FIXME: placeholder
+        if (!init_time_set) {
+            init_time_set = true;
+            init_time = time; time = 0;
+            // TODO: start hardware timer
+            // TODO: set overflow counter to 0, transmit that as well for python multiplication
+            // led's on
+            leds_all_on(); // TODO: move later
+        }
+        valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = (double) time;
+        if (time < prev_time) {
+            overflow_count += 1;
+        }
+        prev_time = time;
+
         elevation = azimuth * 180/PI;
 
-        /*
         samples += 1;
         if (samples >= MAX_SAMPLES) { // write to flash
-            IntDisable(gptmFallingEdgeInt);
-            samples = 0; int _i;
-            for (_i = 0; _i < MAX_SAMPLES; _i += 1) {
-                test_count += 1;
-                double az = valid_angles[_i][0];
-                int d0 = (int) (reduce_digits(az, 0) * 10000);
-                int d1 = (int) (reduce_digits(az, 5) * 10000);
-                int d2 = (int) (reduce_digits(az, 10) * 10000);
-                // mimsyPrintf("%d, %d, %d, %d\r", (int) test_count, d0, d1, d2);
-                // TODO: write to flash
-            }
-            IntEnable(gptmFallingEdgeInt);
-        }*/
+            samples = 0;
+        }
     }
 }
 
