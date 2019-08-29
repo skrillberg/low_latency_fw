@@ -50,7 +50,7 @@ end of frame event), it will turn on its error LED.
 #define OLD_LENGTH_PACKET 8+LENGTH_CRC
 #define CHANNEL         16             ///< 11=2.405GHz
 #define TX_CHANNEL	16	       /// tx channel of individual mote
-#define TIMER_PERIOD    0x3ff         ///< 0xff ~ 125 Hz < 0x3ff ~ 30 Hz < 0x7fff ~ 1 Hz
+#define TIMER_PERIOD    0xff         ///< 0xff ~ 125 Hz < 0x3ff ~ 30 Hz < 0x7fff ~ 1 Hz
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
 #define NUM_ATTEMPTS	3	       ///<number of times packet is resent, needs to match number of motes for multichan experiments
@@ -197,6 +197,9 @@ uint32_t estimate_transmit_count;
 volatile uint32_t overflow_count;
 volatile uint32_t prev_time; volatile uint32_t time;
 volatile uint32_t init_time; volatile bool init_time_set;
+
+// EKF constants
+static const double DISTANCE_M = 1; // FIXME: calibrate
 
 //=========================== prototypes ======================================
 
@@ -926,9 +929,9 @@ void configure_pins(void){
     
     precision_timers_init();
 }
-/*
-static void model(ekf_t * ekf, double accel, double phi, bool update) {
-    // TODO: define your dynamics model
+
+static void model(double * x, double * v, double * fx, double * hx, double * H double accel, double phi, bool update) {
+    // TODO: work through scalar math on paper
     ekf->fx[0] = ekf->x[0] + DT * ekf->x[1];
     ekf->fx[1] = ekf->x[1] + DT * accel;
 
@@ -944,16 +947,18 @@ static void model(ekf_t * ekf, double accel, double phi, bool update) {
     }
 }
 
-void configure_ekf(ekf_t * ekf) {
+void configure_ekf(ekf_t * ekf, double initial_x) {
     // configure Extended Kalman Filter for fusing lighthouse and acceleration data
     ekf_init(&ekf, NUM_STATES, NUM_OBS);
 
     const double S_lh = LH_RAD_VAR;
     const double S_a = ACCEL_G_VAR;
-    const double Rk[2][2] = {{S_lh * S_lh, 0},
-                             {0,           0}};
-    const double Qk[2][2] = {{(S_a * S_a)*(DT*DT*DT*DT) / 4.0, (S_a * S_a)*(DT*DT*DT) / 2.0},
-                             {(S_a * S_a)*(DT*DT*DT) / 2.0,            (S_a * S_a)*(DT*DT)}};
+    const double Hk[1][2] = {{ DISTANCE_M / ((DISTANCE_M * DISTANCE_M) + (initial_x * initial_x)), 0}};
+    const double Rk[1][1] = {{ LH_RAD_VAR * LH_RAD_VAR }};
+    const double Qk[2][2] = {{0, 0,
+                             {0, (S_a * S_a) * (DT * DT)}};
+    /* const double Qk[2][2] = {{(S_a * S_a)*(DT*DT*DT*DT) / 4.0, (S_a * S_a)*(DT*DT*DT) / 2.0},
+                             {(S_a * S_a)*(DT*DT*DT) / 2.0,            (S_a * S_a)*(DT*DT)}}; */
 
     // init covariances of state/measurement noise, can be arbitrary?
     int i; int j;
@@ -961,19 +966,24 @@ void configure_ekf(ekf_t * ekf) {
         ekf->P[i][i] = 1;
     }
     for (i = 0; i < NUM_OBS; i += 1) {
-        for (j = 0; i < NUM_OBS; j += 1) {
-            ekf->R[i][j] = Rk[i][j]; // make this very low
+        for (j = 0; j < NUM_STATES; j += 1) {
+            ekf->H[i][j] = Hk[i][j];
         }
     }
     for (i = 0; i < NUM_OBS; i += 1) {
         for (j = 0; i < NUM_OBS; j += 1) {
-            ekf->Q[i][j] = Qk[i][j]; // make this very low
+            ekf->R[i][j] = Rk[i][j]; // make this very low
+        }
+    }
+    for (i = 0; i < NUM_STATES; i += 1) {
+        for (j = 0; i < NUM_STATES; j += 1) {
+            ekf->Q[i][j] = Qk[i][j];
         }
     }
 
-    ekf->x[0] = 0; // position
+    ekf->x[0] = initial_x; // position
     ekf->x[1] = 0; // velocity
-} COMMENT */
+}
 
 void global_timer_init(void){
     SysCtrlPeripheralEnable(SYS_CTRL_PERIPH_GPT1); // enables timer module
@@ -1021,10 +1031,10 @@ int mote_main(void) {
     // initialize board
     board_init();
 
-    //ekf_t ekf; COMMENT
-    //configure_ekf(&ekf); COMMENT
+    ekf_t ekf;
+    configure_ekf(&ekf);
 
-    //imu_init(); COMMENT
+    imu_init();
 
     x = 0; y = 0; z = 0;
 
@@ -1082,15 +1092,15 @@ int mote_main(void) {
     while (true) {
         if (new_data && !transmitting) {// TODO: still update ekf/position estimate when transmitting??? move if transmitting return inside
             new_data = false;
-            /* model(&ekf, accel, azimuth, update);
+            model(&ekf, accel, azimuth, update);
 
             if (update) {
-            double obs[2] = {azimuth, 0};
+                double obs[2] = {azimuth, 0};
                 if (ekf_step(&ekf, obs)) {
                     ekf_fail += 1;
                 }
                 update = false;
-            } */
+            }
 
             // TODO: update positions & ignore velocities     
             // double pos = ekf.x[0];
@@ -1166,7 +1176,7 @@ int mote_main(void) {
 
             // start transmitting packet
             radio_loadPacket(app_vars.packet,app_vars.packet_len);
-            radio_txEnable();
+            radio_txEnable();           
             radio_txNow();
 
             // clear flag
@@ -1291,7 +1301,7 @@ void pulse_handler_gpio_a(void) {
             // TODO: start hardware timer
             // TODO: set overflow counter to 0, transmit that as well for python multiplication
             // led's on
-            leds_all_on(); // TODO: move later
+            leds_all_on(); // TODO: move later 
         }
         valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = (double) time;
         if (time < prev_time) {
