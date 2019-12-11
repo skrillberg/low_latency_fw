@@ -72,6 +72,7 @@ len=17  num=84  rssi=-81  lqi=108 crc=1
 #include "leds.h"
 #include "uart.h"
 #include "sctimer.h"
+#include "uart_mimsy.h"
 #include <headers/hw_memmap.h>
 #include <headers/hw_sys_ctrl.h>
 #include <headers/hw_gptimer.h>
