@@ -70,8 +70,8 @@ end of frame event), it will turn on its error LED.
 #define CLOCK_SPEED_MHZ 32.0f
 #define MAX_SAMPLES 250
 
-#define LEFT_LIM 1.601823580621385f
-#define RIGHT_LIM 1.5278037261196f
+#define LEFT_LIM .051f
+#define RIGHT_LIM -.049f
 
 #define IMU_ADDRESS 0x69
 #define LOW_POWER 0
@@ -86,7 +86,7 @@ end of frame event), it will turn on its error LED.
 #define FLASH_PAGE_STORAGE_START 100 //first flash page to start at. TODO: make sure this doesn't overlap
 
 #define LH_RAD_VAR 0.00000001f
-#define ACCEL_G_VAR 0.01f
+#define ACCEL_G_VAR 0.1f
 #define NUM_STATES 2
 #define NUM_OBS 1
 
@@ -110,39 +110,6 @@ typedef struct {
 	uint8_t               asn[5];
 	int					   valid;
 } location_t;
-
-typedef struct {
-
-    int n;           // number of state values 
-    int m;           // number of observables 
-
-    double x[NUM_STATES];     // state vector 
-
-    double P[NUM_STATES][NUM_STATES];  // prediction error covariance 
-    double Q[NUM_STATES][NUM_STATES];  // process noise covariance 
-    double R[NUM_OBS][NUM_OBS];  // measurement error covariance 
-
-    double G[NUM_STATES][NUM_OBS];  // Kalman gain; a.k.a. K 
-
-    double F[NUM_STATES][NUM_STATES];  // Jacobian of process model 
-    double H[NUM_OBS][NUM_STATES];  // Jacobian of measurement model 
-
-    double Ht[NUM_STATES][NUM_OBS]; // transpose of measurement Jacobian 
-    double Ft[NUM_STATES][NUM_STATES]; // transpose of process Jacobian 
-    double Pp[NUM_STATES][NUM_STATES]; // P, post-prediction, pre-update 
-
-    double fx[NUM_STATES];   // output of user defined f() state-transition function 
-    double hx[NUM_OBS];   // output of user defined h() measurement function 
-
-    // temporary storage 
-    double tmp0[NUM_STATES][NUM_STATES];
-    double tmp1[NUM_STATES][NUM_OBS];
-    double tmp2[NUM_OBS][NUM_STATES];
-    double tmp3[NUM_OBS][NUM_OBS];
-    double tmp4[NUM_OBS][NUM_OBS];
-    double tmp5[NUM_OBS]; 
-
-} ekf_t;
 
 //=========================== variables =======================================
 //bool isTx = true;
@@ -207,7 +174,7 @@ static const uint32_t timer_cnt_32 = 0xFFFFFFFF;
 static const uint32_t timer_cnt_16 = 0xFFFF;
 static const uint32_t timer_cnt_24 = 0xFFFFFF;
 
-double accel;
+double acceleration;
 volatile double azimuth;
 volatile double elevation;
 volatile bool new_data;
@@ -241,28 +208,18 @@ static const double DT = 1.0/125.0; // FIXME: this is just the IMU update rate
 double x[NUM_STATES];     // state vector 
 
 double P[NUM_STATES][NUM_STATES];  // prediction error covariance 
-double Q[NUM_STATES][NUM_STATES];  // process noise covariance 
+double Q[NUM_STATES][NUM_STATES];  // process noise covariance (not used explicitly)
 double R[NUM_OBS][NUM_OBS];  // measurement error covariance 
+
+double Pp[NUM_STATES][NUM_STATES]; // P, post-prediction, pre-update
 
 double G[NUM_STATES][NUM_OBS];  // Kalman gain; a.k.a. K 
 
 double F[NUM_STATES][NUM_STATES];  // Jacobian of process model 
 double H[NUM_OBS][NUM_STATES];  // Jacobian of measurement model 
 
-double Ht[NUM_STATES][NUM_OBS]; // transpose of measurement Jacobian 
-double Ft[NUM_STATES][NUM_STATES]; // transpose of process Jacobian 
-double Pp[NUM_STATES][NUM_STATES]; // P, post-prediction, pre-update 
-
 double fx[NUM_STATES];   // output of user defined f() state-transition function 
-double hx[NUM_OBS];   // output of user defined h() measurement function 
-
-// temporary storage 
-double tmp0[NUM_STATES][NUM_STATES];
-double tmp1[NUM_STATES][NUM_OBS];
-double tmp2[NUM_OBS][NUM_STATES];
-double tmp3[NUM_OBS][NUM_OBS];
-double tmp4[NUM_OBS][NUM_OBS];
-double tmp5[NUM_OBS]; 
+double hx[NUM_OBS];   // output of user defined h() measurement function
 
 //=========================== prototypes ======================================
 
@@ -737,7 +694,7 @@ void imu_init(void) {
     i2c_read_byte(IMU_ADDRESS, byteptr);
 }
 
-void get_scalar_accel(uint16_t *accel, uint32_t *timestamp) { // FIXME: put back when done debugging, is there a way to have this service an interrupt?
+void get_scalar_accel(double *accel, uint32_t *timestamp) { // FIXME: put back when done debugging, is there a way to have this service an interrupt?
     uint8_t address = IMU_ADDRESS;
     uint8_t readbyte;  
     uint8_t *byteptr = &readbyte;
@@ -995,19 +952,6 @@ void configure_pins(void){
     precision_timers_init();
 }
 
-static void model(double accel, double phi) {
-    fx[0] = x[0] + DT * x[1];
-    fx[1] = x[1] + DT * accel;
-
-    F[0][0] = 1; F[0][1] = DT;
-    F[1][0] = 0; F[1][1] = 1;
-
-    hx[0] = my_atan(fx[0] / DISTANCE_M);
-
-    H[0][0] = DISTANCE_M / ((DISTANCE_M * DISTANCE_M) + (fx[0]*fx[0]));
-    H[0][1] = 0;
-}
-
 void ekf_zero() {
     int i; int j;
 
@@ -1017,7 +961,6 @@ void ekf_zero() {
     for (i = 0; i < NUM_STATES; i += 1) {
         for (j = 0; j < NUM_STATES; j += 1) {
             P[i][j] = 0.0;
-            Q[i][j] = 0.0;
             Pp[i][j] = 0.0;
         }
     }
@@ -1029,12 +972,10 @@ void ekf_zero() {
     for (i = 0; i < NUM_STATES; i += 1) {
         for (j = 0; j < NUM_STATES; j += 1) {
             F[i][j] = 0.0;
-            Ft[i][j] = 0.0;
         }
     }
 
     H[0][0] = 0.0; H[0][1] = 0.0;
-    Ht[0][0] = 0.0; H[1][0] = 0.0;
 
     fx[0] = 0.0; fx[1] = 0.0;
     hx[0] = 0.0;
@@ -1045,49 +986,57 @@ void configure_ekf() {
 
     const double initial_x = 0.0;
 
-    const double S_lh = LH_RAD_VAR;
-    const double S_a = ACCEL_G_VAR;
-    const double Hk[1][2] = {{ DISTANCE_M / ((DISTANCE_M * DISTANCE_M) + (initial_x * initial_x)), 0}};
-    const double Rk[1][1] = {{ LH_RAD_VAR * LH_RAD_VAR }};
-    const double Qk[2][2] = {{0, 0}, {0, (S_a * S_a) * (DT * DT)}};
     // const double Qk[2][2] = {{(S_a * S_a)*(DT*DT*DT*DT) / 4.0, (S_a * S_a)*(DT*DT*DT) / 2.0}, {(S_a * S_a)*(DT*DT*DT) / 2.0,            (S_a * S_a)*(DT*DT)}};
 
-    // init covariances of state/measurement noise, can be arbitrary?
+    // init covariances of state/measurement noise
     int i; int j;
-    H[0][0] = Hk[0][0];
+    H[0][0] = DISTANCE_M / ((DISTANCE_M * DISTANCE_M) + (initial_x * initial_x));
     H[0][1] = 0;
 
-    R[0][0] = Rk[0][0];
-    Q[1][1] = Qk[1][1];
-    for (i = 0; i < NUM_STATES; i += 1) {
-        P[i][i] = 1.0;
-    }
+    R[0][0] = LH_RAD_VAR * LH_RAD_VAR;
+    P[0][0] = 0.1; P[1][1] = 0.1;
 
     x[0] = initial_x; // position
     x[1] = 0.0; // velocity
 }
 
-int ekf_step(z) {
-    // TODO: implement
+static void model(double accel, double dt) {
+    /* Update process/dynamics model. */
+    fx[0] = x[0] + (dt * x[1]);
+    fx[1] = x[1] + (dt * accel);
+
+    /* Update process Jacobian. */
+    F[0][0] = 1; F[0][1] = dt;
+    F[1][0] = 0; F[1][1] = 1;
+
+    /* Update measurement model. */
+    hx[0] = my_atan(fx[0] / DISTANCE_M);
+
+    /* Update measurement Jacobian. */
+    H[0][0] = DISTANCE_M / ((DISTANCE_M * DISTANCE_M) + (fx[0]*fx[0]));
+    H[0][1] = 0;
+}
+
+int ekf_step(double z, double dt) {
     /* Updated Process Covariance Estimate */ 
     /* P_k = F_{k-1} P_{k-1} F^T_{k-1} + Q_{k-1} */
 
     double a; double b; double c; double d;
     a = P[0][0]; b = P[0][1]; c = P[1][0]; d = P[1][1];
 
-    Pp[0][0] = a + b * DT; Pp[0][1] = c * DT + d * DT * DT;
-    Pp[1][0] = c + d * DT; Pp[1][1] = d + ACCEL_G_VAR * DT * DT;
+    Pp[0][0] = a + (b * dt) + (c * dt) + (d * dt * dt); Pp[0][1] = b + d * dt;
+    Pp[1][0] = c + (d * dt); Pp[1][1] = d + (ACCEL_G_VAR * dt * dt);
     
     /* Kalman Gain Computation */
     /* G_k = P_k H^T_k (H_k P_k H^T_k + R)^{-1} */
 
     a = Pp[0][0]; b = Pp[0][1]; c = Pp[1][0]; d = Pp[1][1];
     double l = H[0][0]; double r = R[0][0];
-    double denom = a*l*l + r;
+    double denom = (a*l*l) + r;
 
     if (denom == 0) { return 1; }
 
-    G[0][0] = a*l / denom; G[1][0] = b*l / denom;
+    G[0][0] = (a*l) / denom; G[1][0] = (c*l) / denom;
 
     /* Innovation and Kalman Gain --> State Estimate */
     /* \hat{x}_k = \hat{x_k} + G_k(z_k - h(\hat{x}_k)) */
@@ -1103,8 +1052,8 @@ int ekf_step(z) {
     a = Pp[0][0]; b = Pp[0][1]; c = Pp[1][0]; d = Pp[1][1];
     double g1 = G[0][0]; double g2 = G[1][0];
 
-    P[0][0] = (1-g1*l)*a; P[0][1] = (1-g1*l)*b;
-    P[1][0] = g2*l*a + c; P[1][1] = g2*l*b+d;
+    P[0][0] = (1-(g1*l))*a; P[0][1] = (1-(g1*l))*b;
+    P[1][0] = (g2*l*a) + c; P[1][1] = (g2*l*b)+d;
 
     return 0;
 }
@@ -1135,7 +1084,7 @@ int mote_main(void) {
     azimuth = 0.0;
     broken1 = 0; broken2 = 0; broken3 = 0; ekf_fail = 0;
 
-    accel = 0;
+    acceleration = 0;
     
     new_data = false; update = false;
 
@@ -1197,17 +1146,27 @@ int mote_main(void) {
     bool control_flag = false;
     double pos; uint32_t pos_time; // TODO: make sure you're not overwriting when sending estimate
     while (true) {
-        if (imu_ready) {
+        if (imu_ready || new_data) {
             imu_ready = false;
             send_est = true;
 
-            int accel[3]; int timestamp;
+            double accel[3]; int timestamp;
             get_scalar_accel(accel, &timestamp);
+            new_data = true;
 
-            model(0, azimuth);
+            uint32_t curr_time = TimerValueGet(gptmTimerBase, GPTIMER_A);
+            double dt = get_period_us_32(prev_time, curr_time) / 1000000.0;
+            if (prev_time == 0) {
+                dt = DT;
+            }
+            prev_time = curr_time;
 
-            if (update) {;
-                if (ekf_step(azimuth)) {
+            acceleration = -accel[0];
+
+            model(0, dt); // FIXME: acceleration
+
+            if (update) {
+                if (ekf_step(azimuth, dt)) {
                     ekf_fail += 1;
                 }
                 update = false;
@@ -1229,13 +1188,11 @@ int mote_main(void) {
                 rx_packet_count += 1;
             }
 
-            if (imu_ready && !send_est) { // TODO: set flag here and do if statement on outer that handles ground truth transmission (don't break direction switch state machine while you're at it --> if most recent pos >= LIM, send switch signal with priority)
+            // if (imu_ready && !send_est) { // TODO: set flag here and do if statement on outer that handles ground truth transmission (don't break direction switch state machine while you're at it --> if most recent pos >= LIM, send switch signal with priority)
                                     // TODO: while emptying this array, start filling another one with new pose data, and when done, copy over and empty that one (assume transmission is quick so you can disable interrupts when transmitting --> won't lose too many pulses, if any, I hope)
-                imu_ready = false;
-                send_est = true;
                 // TODO: make second timer for IMU reading that's different s.t. position transmissions only come on specified interval
                 // TODO: or actually just make it so that whenever array count is above 200 or sth you start sending shit
-            }
+            // }
         }
 
         if (!control_flag && send_est && !transmitting) { // if control_flag set, wait till next round to transmit
@@ -1263,6 +1220,15 @@ int mote_main(void) {
             d[offset + 5] = (uint8_t) (reduce_digits(pos, 10) * 10);
             d[offset + 6] = (uint8_t) (reduce_digits(pos, 12) * 10);
             d[offset + 7] = (uint8_t) (reduce_digits(pos, 14) * 10);
+
+            /* d[offset + 0] = (uint8_t) (reduce_digits(acceleration, 0) * 10);
+            d[offset + 1] = (uint8_t) (reduce_digits(acceleration, 2) * 10);
+            d[offset + 2] = (uint8_t) (reduce_digits(acceleration, 4) * 10);
+            d[offset + 3] = (uint8_t) (reduce_digits(acceleration, 6) * 10);
+            d[offset + 4] = (uint8_t) (reduce_digits(acceleration, 8) * 10);
+            d[offset + 5] = (uint8_t) (reduce_digits(acceleration, 10) * 10);
+            d[offset + 6] = (uint8_t) (reduce_digits(acceleration, 12) * 10);
+            d[offset + 7] = (uint8_t) (reduce_digits(acceleration, 14) * 10); */
 
             /* d[offset + 8] = (uint8_t) (((uint32_t) (pos_time / 100000000.0)) % 100);
             d[offset + 9] = (uint8_t) (((uint32_t) (pos_time / 1000000.0)) % 100);
@@ -1408,10 +1374,9 @@ void pulse_handler_gpio_a(void) {
 
         test_count += 1;
 
-        azimuth = loc.phi; new_data = true; update = true;
+        azimuth = loc.phi - PI/2.0; new_data = true; update = true; send_est = true;
 
         time = TimerValueGet(gptmTimerBase, GPTIMER_A) - init_time;
-        time += 1; // FIXME: placeholder
         if (!init_time_set) {
             init_time_set = true;
             init_time = time; time = 0;
@@ -1421,10 +1386,6 @@ void pulse_handler_gpio_a(void) {
             leds_all_on(); // TODO: move later 
         }
         valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = (double) time;
-        if (time < prev_time) {
-            overflow_count += 1;
-        }
-        prev_time = time;
 
         elevation = azimuth * 180/PI;
 

@@ -50,7 +50,6 @@ Example when running on the IoT-LAB platform:
 `___'|  _/\___.|_|_||__/_/ <___/|_\_|
      |_|                  openwsn.org
 
-
 running IoT-lAB? (Y|N): Y
 motename? (e.g. wsn430-35): wsn430-35
 len=17  num=84  rssi=-80  lqi=107 crc=1
@@ -71,8 +70,8 @@ len=17  num=84  rssi=-81  lqi=108 crc=1
 #include "radio.h"
 #include "leds.h"
 #include "uart.h"
-#include "sctimer.h"
 #include "uart_mimsy.h"
+#include "sctimer.h"
 #include <headers/hw_memmap.h>
 #include <headers/hw_sys_ctrl.h>
 #include <headers/hw_gptimer.h>
@@ -85,7 +84,6 @@ len=17  num=84  rssi=-81  lqi=108 crc=1
 #define LENGTH_PACKET        8+LENGTH_CRC ///< maximum length is 127 bytes
 #define CHANNEL              16           ///< 11 = 2.405GHz
 #define LENGTH_SERIAL_FRAME  8              ///< length of the serial frame
-#define UART_PAYLOAD         350
 
 //=========================== variables =======================================
 
@@ -124,7 +122,6 @@ void cb_endFrame(PORT_TIMER_WIDTH timestamp);
 
 static const uint32_t gptmTimerBase = GPTIMER3_BASE;
 static const uint32_t timer_cnt_32 = 0xFFFFFFFF;
-uint32_t poses[UART_PAYLOAD][9];
 
 //=========================== main ============================================
 
@@ -139,7 +136,6 @@ void global_timer_init(void){
 
 /**
 \brief The program starts executing here.
-
 */
 int mote_main(void) {
     int i=0;
@@ -158,14 +154,6 @@ int mote_main(void) {
     // uart_setCallbacks(cb_uartTxDone,cb_uartRxCb);
     uartMimsyInit();
 
-    int j = 0;
-    for (i = 0; i < UART_PAYLOAD; i += 1) {
-        for (j = 0; j < 9; j += 1) {
-            poses[i][j] = 0;
-        }
-    }
-    i = 0;
-
     // prepare radio
     radio_rfOn();
     radio_setFrequency(CHANNEL);
@@ -179,13 +167,13 @@ int mote_main(void) {
     radio_txNow();
     int packet_valid;
 
-    bool first = true; uint32_t init_time = 0; uint32_t time = 0; uint32_t idx = 0;
+    bool first = true; uint32_t init_time = 0; uint32_t time = 0;
 
     while (1) {
         /*Added by SY*/
         //	   memset(&app_vars,0,sizeof(app_vars_t));
         packet_valid = 0;
-        j = 0;
+        int j = 0;
         // sleep while waiting for at least one of the rxpk_done to be set
         app_vars.rxpk_done = 0;
         while (app_vars.rxpk_done==0) {
@@ -250,21 +238,11 @@ int mote_main(void) {
             //	   GPIOPinWrite(GPIO_A_BASE,GPIO_PIN_2,0);
 
         } else {
-            poses[idx][0] = time;
-            for (j = 1; j < 9; j += 1) {
-                poses[idx][j] = app_vars.rxpk_buf[j-1];
-            }
-            idx += 1;
-            if (idx == UART_PAYLOAD) {
-                idx = 0;
-                for (j = 0; j < UART_PAYLOAD; j += 1) {
-                    mimsyPrintf("%u, %d, %d, %d, %d, %d, %d, %d, %d\r", poses[j][0], poses[j][1],
-                                                                        poses[j][2], poses[j][3],
-                                                                        poses[j][4], poses[j][5],
-                                                                        poses[j][6], poses[j][7],
-                                                                        poses[j][8]);
-                } // TODO: gotta make sure that you wait a bit to let the rest of the poses to write at the end
-            }
+            mimsyPrintf("%u, %d, %d, %d, %d, %d, %d, %d, %d\r", time, app_vars.rxpk_buf[0], app_vars.rxpk_buf[1],
+                        app_vars.rxpk_buf[2], app_vars.rxpk_buf[3],
+                        app_vars.rxpk_buf[4], app_vars.rxpk_buf[5],
+                        app_vars.rxpk_buf[6], app_vars.rxpk_buf[7]
+                        ); // TODO: store every 500 in a list and print it out
         }
     }
 }
@@ -306,7 +284,6 @@ void cb_endFrame(PORT_TIMER_WIDTH timestamp) {
    // led
    leds_sync_off();
 }
-
 
 
 
