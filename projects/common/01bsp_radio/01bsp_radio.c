@@ -73,7 +73,6 @@ end of frame event), it will turn on its error LED.
 #define LEFT_LIM 1.601823580621385f
 #define RIGHT_LIM 1.5278037261196f
 
-#define DT 1.0f // FIXME: figure out kalman time step in us?
 #define IMU_ADDRESS 0x69
 #define LOW_POWER 0
 #define ACCEL_SENS 16384.0f // TODO: check this, may have to be more precise??
@@ -85,6 +84,11 @@ end of frame event), it will turn on its error LED.
 #define DATAPOINTS			100
 #define FLASH_PAGES_TOUSE	50
 #define FLASH_PAGE_STORAGE_START 100 //first flash page to start at. TODO: make sure this doesn't overlap
+
+#define LH_RAD_VAR 0.00000001f
+#define ACCEL_G_VAR 0.01f
+#define NUM_STATES 2
+#define NUM_OBS 1
 
 //=========================== typedef =========================================
 
@@ -106,6 +110,39 @@ typedef struct {
 	uint8_t               asn[5];
 	int					   valid;
 } location_t;
+
+typedef struct {
+
+    int n;           // number of state values 
+    int m;           // number of observables 
+
+    double x[NUM_STATES];     // state vector 
+
+    double P[NUM_STATES][NUM_STATES];  // prediction error covariance 
+    double Q[NUM_STATES][NUM_STATES];  // process noise covariance 
+    double R[NUM_OBS][NUM_OBS];  // measurement error covariance 
+
+    double G[NUM_STATES][NUM_OBS];  // Kalman gain; a.k.a. K 
+
+    double F[NUM_STATES][NUM_STATES];  // Jacobian of process model 
+    double H[NUM_OBS][NUM_STATES];  // Jacobian of measurement model 
+
+    double Ht[NUM_STATES][NUM_OBS]; // transpose of measurement Jacobian 
+    double Ft[NUM_STATES][NUM_STATES]; // transpose of process Jacobian 
+    double Pp[NUM_STATES][NUM_STATES]; // P, post-prediction, pre-update 
+
+    double fx[NUM_STATES];   // output of user defined f() state-transition function 
+    double hx[NUM_OBS];   // output of user defined h() measurement function 
+
+    // temporary storage 
+    double tmp0[NUM_STATES][NUM_STATES];
+    double tmp1[NUM_STATES][NUM_OBS];
+    double tmp2[NUM_OBS][NUM_STATES];
+    double tmp3[NUM_OBS][NUM_OBS];
+    double tmp4[NUM_OBS][NUM_OBS];
+    double tmp5[NUM_OBS]; 
+
+} ekf_t;
 
 //=========================== variables =======================================
 //bool isTx = true;
@@ -180,7 +217,6 @@ uint32_t ekf_fail;
 static const double sweep_velocity = PI / SWEEP_PERIOD_US;
 
 bool imu_ready;
-double x; double y; double z;
 
 volatile double valid_angles[MAX_SAMPLES][2];
 volatile pulse_t pulses[PULSE_TRACK_COUNT];
@@ -198,8 +234,35 @@ volatile uint32_t overflow_count;
 volatile uint32_t prev_time; volatile uint32_t time;
 volatile uint32_t init_time; volatile bool init_time_set;
 
-// EKF constants
-static const double DISTANCE_M = 1; // FIXME: calibrate
+// EKF
+static const double DISTANCE_M = 2.24792; // FIXME: calibrate
+static const double DT = 1.0/125.0; // FIXME: this is just the IMU update rate
+
+double x[NUM_STATES];     // state vector 
+
+double P[NUM_STATES][NUM_STATES];  // prediction error covariance 
+double Q[NUM_STATES][NUM_STATES];  // process noise covariance 
+double R[NUM_OBS][NUM_OBS];  // measurement error covariance 
+
+double G[NUM_STATES][NUM_OBS];  // Kalman gain; a.k.a. K 
+
+double F[NUM_STATES][NUM_STATES];  // Jacobian of process model 
+double H[NUM_OBS][NUM_STATES];  // Jacobian of measurement model 
+
+double Ht[NUM_STATES][NUM_OBS]; // transpose of measurement Jacobian 
+double Ft[NUM_STATES][NUM_STATES]; // transpose of process Jacobian 
+double Pp[NUM_STATES][NUM_STATES]; // P, post-prediction, pre-update 
+
+double fx[NUM_STATES];   // output of user defined f() state-transition function 
+double hx[NUM_OBS];   // output of user defined h() measurement function 
+
+// temporary storage 
+double tmp0[NUM_STATES][NUM_STATES];
+double tmp1[NUM_STATES][NUM_OBS];
+double tmp2[NUM_OBS][NUM_STATES];
+double tmp3[NUM_OBS][NUM_OBS];
+double tmp4[NUM_OBS][NUM_OBS];
+double tmp5[NUM_OBS]; 
 
 //=========================== prototypes ======================================
 
@@ -727,8 +790,10 @@ void get_scalar_accel(uint16_t *accel, uint32_t *timestamp) { // FIXME: put back
 
     timestamp = TimerValueGet(GPTIMER2_BASE, GPTIMER_A);
 
-    x = ((double) ax) / 16000.0; y = ((double) ay) / 16000.0; z = ((double) az) / 16000.0;
-    accel[0] = ax; accel[1] = ay; accel[2] = az; // TODO: debias from gravity using gyro readings
+    // x = ((double) ax) / 16000.0; y = ((double) ay) / 16000.0; z = ((double) az) / 16000.0;
+    accel[0] = ((double) ax) / 16000.0;
+    accel[1] = ((double) ay) / 16000.0;
+    accel[2] = ((double) az) / 16000.0; // TODO: debias from gravity using gyro readings?
 }
 
 void complementary_filter(short accelData[3], short gyroData[3], double *pitch, double *roll, double dt)
@@ -930,59 +995,118 @@ void configure_pins(void){
     precision_timers_init();
 }
 
-static void model(double * x, double * v, double * fx, double * hx, double * H double accel, double phi, bool update) {
-    // TODO: work through scalar math on paper
-    ekf->fx[0] = ekf->x[0] + DT * ekf->x[1];
-    ekf->fx[1] = ekf->x[1] + DT * accel;
+static void model(double accel, double phi) {
+    fx[0] = x[0] + DT * x[1];
+    fx[1] = x[1] + DT * accel;
 
-    ekf->F[0][0] = 1; ekf->F[0][1] = DT;
-    ekf->F[1][0] = 0; ekf->F[1][1] = 1;
+    F[0][0] = 1; F[0][1] = DT;
+    F[1][0] = 0; F[1][1] = 1;
 
-    if (update) {
-        ekf->hx[0] = my_atan(ekf->x[0]);
-        ekf->hx[1] = 0;
+    hx[0] = my_atan(fx[0] / DISTANCE_M);
 
-        ekf->H[0][0] = 1.0 / (1.0 + x*x);
-        ekf->H[0][1] = 0; ekf->H[1][0] = 0; ekf->H[1][1] = 0;
-    }
+    H[0][0] = DISTANCE_M / ((DISTANCE_M * DISTANCE_M) + (fx[0]*fx[0]));
+    H[0][1] = 0;
 }
 
-void configure_ekf(ekf_t * ekf, double initial_x) {
-    // configure Extended Kalman Filter for fusing lighthouse and acceleration data
-    ekf_init(&ekf, NUM_STATES, NUM_OBS);
+void ekf_zero() {
+    int i; int j;
+
+    // x
+    x[0] = 0; x[1] = 0.0;     // state vector 
+
+    for (i = 0; i < NUM_STATES; i += 1) {
+        for (j = 0; j < NUM_STATES; j += 1) {
+            P[i][j] = 0.0;
+            Q[i][j] = 0.0;
+            Pp[i][j] = 0.0;
+        }
+    }
+
+    R[0][0] = 0.0;
+
+    G[0][0] = 0.0; G[1][0] = 0.0;
+
+    for (i = 0; i < NUM_STATES; i += 1) {
+        for (j = 0; j < NUM_STATES; j += 1) {
+            F[i][j] = 0.0;
+            Ft[i][j] = 0.0;
+        }
+    }
+
+    H[0][0] = 0.0; H[0][1] = 0.0;
+    Ht[0][0] = 0.0; H[1][0] = 0.0;
+
+    fx[0] = 0.0; fx[1] = 0.0;
+    hx[0] = 0.0;
+}
+
+void configure_ekf() {
+    ekf_zero();
+
+    const double initial_x = 0.0;
 
     const double S_lh = LH_RAD_VAR;
     const double S_a = ACCEL_G_VAR;
     const double Hk[1][2] = {{ DISTANCE_M / ((DISTANCE_M * DISTANCE_M) + (initial_x * initial_x)), 0}};
     const double Rk[1][1] = {{ LH_RAD_VAR * LH_RAD_VAR }};
-    const double Qk[2][2] = {{0, 0,
-                             {0, (S_a * S_a) * (DT * DT)}};
-    /* const double Qk[2][2] = {{(S_a * S_a)*(DT*DT*DT*DT) / 4.0, (S_a * S_a)*(DT*DT*DT) / 2.0},
-                             {(S_a * S_a)*(DT*DT*DT) / 2.0,            (S_a * S_a)*(DT*DT)}}; */
+    const double Qk[2][2] = {{0, 0}, {0, (S_a * S_a) * (DT * DT)}};
+    // const double Qk[2][2] = {{(S_a * S_a)*(DT*DT*DT*DT) / 4.0, (S_a * S_a)*(DT*DT*DT) / 2.0}, {(S_a * S_a)*(DT*DT*DT) / 2.0,            (S_a * S_a)*(DT*DT)}};
 
     // init covariances of state/measurement noise, can be arbitrary?
     int i; int j;
+    H[0][0] = Hk[0][0];
+    H[0][1] = 0;
+
+    R[0][0] = Rk[0][0];
+    Q[1][1] = Qk[1][1];
     for (i = 0; i < NUM_STATES; i += 1) {
-        ekf->P[i][i] = 1;
-    }
-    for (i = 0; i < NUM_OBS; i += 1) {
-        for (j = 0; j < NUM_STATES; j += 1) {
-            ekf->H[i][j] = Hk[i][j];
-        }
-    }
-    for (i = 0; i < NUM_OBS; i += 1) {
-        for (j = 0; i < NUM_OBS; j += 1) {
-            ekf->R[i][j] = Rk[i][j]; // make this very low
-        }
-    }
-    for (i = 0; i < NUM_STATES; i += 1) {
-        for (j = 0; i < NUM_STATES; j += 1) {
-            ekf->Q[i][j] = Qk[i][j];
-        }
+        P[i][i] = 1.0;
     }
 
-    ekf->x[0] = initial_x; // position
-    ekf->x[1] = 0; // velocity
+    x[0] = initial_x; // position
+    x[1] = 0.0; // velocity
+}
+
+int ekf_step(z) {
+    // TODO: implement
+    /* Updated Process Covariance Estimate */ 
+    /* P_k = F_{k-1} P_{k-1} F^T_{k-1} + Q_{k-1} */
+
+    double a; double b; double c; double d;
+    a = P[0][0]; b = P[0][1]; c = P[1][0]; d = P[1][1];
+
+    Pp[0][0] = a + b * DT; Pp[0][1] = c * DT + d * DT * DT;
+    Pp[1][0] = c + d * DT; Pp[1][1] = d + ACCEL_G_VAR * DT * DT;
+    
+    /* Kalman Gain Computation */
+    /* G_k = P_k H^T_k (H_k P_k H^T_k + R)^{-1} */
+
+    a = Pp[0][0]; b = Pp[0][1]; c = Pp[1][0]; d = Pp[1][1];
+    double l = H[0][0]; double r = R[0][0];
+    double denom = a*l*l + r;
+
+    if (denom == 0) { return 1; }
+
+    G[0][0] = a*l / denom; G[1][0] = b*l / denom;
+
+    /* Innovation and Kalman Gain --> State Estimate */
+    /* \hat{x}_k = \hat{x_k} + G_k(z_k - h(\hat{x}_k)) */
+
+    double innovation = z - hx[0];
+
+    x[0] = fx[0] + innovation * G[0][0];
+    x[1] = fx[1] + innovation * G[1][0];
+
+    /* Updated Measurement Model Covariance Estimate */
+    /* P_k = (I - G_k H_k) P_k */
+
+    a = Pp[0][0]; b = Pp[0][1]; c = Pp[1][0]; d = Pp[1][1];
+    double g1 = G[0][0]; double g2 = G[1][0];
+
+    P[0][0] = (1-g1*l)*a; P[0][1] = (1-g1*l)*b;
+    P[1][0] = g2*l*a + c; P[1][1] = g2*l*b+d;
+
+    return 0;
 }
 
 void global_timer_init(void){
@@ -1030,26 +1154,9 @@ int mote_main(void) {
 
     // initialize board
     board_init();
-
-    ekf_t ekf;
-    configure_ekf(&ekf);
+    configure_ekf();
 
     imu_init();
-
-    x = 0; y = 0; z = 0;
-
-    /* while (true) {
-        // lighthouse
-    }
-
-    while (!finished) {
-        while (!imu_ready) {
-            // wait for new IMU update
-        }
-        int accel[3]; int timestamp;
-        get_scalar_accel(accel, &timestamp);
-        imu_ready = false;
-    } */
 
     // start bsp timer
     sctimer_set_callback(cb_timer);
@@ -1090,17 +1197,25 @@ int mote_main(void) {
     bool control_flag = false;
     double pos; uint32_t pos_time; // TODO: make sure you're not overwriting when sending estimate
     while (true) {
-        if (new_data && !transmitting) {// TODO: still update ekf/position estimate when transmitting??? move if transmitting return inside
-            new_data = false;
-            model(&ekf, accel, azimuth, update);
+        if (imu_ready) {
+            imu_ready = false;
+            send_est = true;
 
-            if (update) {
-                double obs[2] = {azimuth, 0};
-                if (ekf_step(&ekf, obs)) {
+            int accel[3]; int timestamp;
+            get_scalar_accel(accel, &timestamp);
+
+            model(0, azimuth);
+
+            if (update) {;
+                if (ekf_step(azimuth)) {
                     ekf_fail += 1;
                 }
                 update = false;
             }
+        }
+
+        if (new_data && !transmitting) {// TODO: still update ekf/position estimate when transmitting??? move if transmitting return inside
+            new_data = false;
 
             // TODO: update positions & ignore velocities     
             // double pos = ekf.x[0];
@@ -1289,7 +1404,9 @@ void pulse_handler_gpio_a(void) {
         pulse_count = 0; // TODO: maybe only do this if pulses are valid???
         // recover azimuth and elevation
         location_t loc = localize_mimsy(pulses_local);
-        if (!loc.valid) { test_count += 1; return; }
+        if (!loc.valid) { return; }
+
+        test_count += 1;
 
         azimuth = loc.phi; new_data = true; update = true;
 
