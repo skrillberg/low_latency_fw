@@ -47,9 +47,7 @@ end of frame event), it will turn on its error LED.
 //=========================== defines =========================================
 
 #define LENGTH_PACKET   8+LENGTH_CRC ///< maximum length is 127 bytes --> TODO: use 100
-#define OLD_LENGTH_PACKET 8+LENGTH_CRC
 #define CHANNEL         16             ///< 11=2.405GHz
-#define TX_CHANNEL	16	       /// tx channel of individual mote
 #define TIMER_PERIOD    0xff         ///< 0xff ~ 125 Hz < 0x3ff ~ 30 Hz < 0x7fff ~ 1 Hz
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
@@ -200,6 +198,7 @@ uint32_t estimate_transmit_count;
 volatile uint32_t overflow_count;
 volatile uint32_t prev_time; volatile uint32_t time;
 volatile uint32_t init_time; volatile bool init_time_set;
+volatile bool send_est;
 
 // EKF
 static const double DISTANCE_M = 2.24792; // FIXME: calibrate
@@ -652,13 +651,6 @@ float my_sqrt(float square)
     return root;
 }
 
-double reduce_digits(double f, int num) {
-    if (num == 0) {
-        return f;
-    }
-    return reduce_digits((f - ((double)((int) f)))*10, num-1);
-}
-
 //======================================START===========================================
 
 void imu_init(void) {
@@ -1053,7 +1045,7 @@ int ekf_step(double z, double dt) {
     double g1 = G[0][0]; double g2 = G[1][0];
 
     P[0][0] = (1-(g1*l))*a; P[0][1] = (1-(g1*l))*b;
-    P[1][0] = (g2*l*a) + c; P[1][1] = (g2*l*b)+d;
+    P[1][0] = (g2*l*a) + c; P[1][1] = (g2*l*b) + d;
 
     return 0;
 }
@@ -1088,8 +1080,8 @@ int mote_main(void) {
     
     new_data = false; update = false;
 
-    uint16_t passphrase[4] = {0xAC,0xAC,0xA5,0XB1};  // Mote1 ID
-    // uint16_t passphrase[4] = {0xBD,0xBD,0xB6,0XC2}; // Mote2 ID
+    // uint16_t passphrase[4] = {0xAC,0xAC,0xA5,0XB1};  // Mote1 ID
+    uint16_t passphrase[4] = {0xBD,0xBD,0xB6,0XC2}; // Mote2 ID
     tx_packet_count=0; //reset packet sent counter
     rx_packet_count=0; //reset packet rx counter
     uint32_t byte_masks[4]={0xff000000,0x00ff0000,0x0000ff00,0x000000ff}; //used to access each byte of counter
@@ -1142,13 +1134,12 @@ int mote_main(void) {
 
     bool first = false; bool enabled = true;
 
-    bool send_est = false;
+    send_est = false;
     bool control_flag = false;
     double pos; uint32_t pos_time; // TODO: make sure you're not overwriting when sending estimate
     while (true) {
         if (imu_ready || new_data) {
             imu_ready = false;
-            send_est = true;
 
             double accel[3]; int timestamp;
             get_scalar_accel(accel, &timestamp);
@@ -1178,7 +1169,7 @@ int mote_main(void) {
 
             // TODO: update positions & ignore velocities     
             // double pos = ekf.x[0];
-            pos = azimuth; pos_time = time;
+            pos = my_atan(x[0]); pos_time = time;
 
             // send packet with azimuth data
 
@@ -1211,46 +1202,46 @@ int mote_main(void) {
             // (i.e. 3.141592653589793 --> 31, 41, 59, 26, 53, 58, 97, 93)
             // and send over TxChannel
 
-            uint8_t d[8+5]; uint8_t offset = 0;
-            d[offset + 0] = (uint8_t) (reduce_digits(pos, 0) * 10);
-            d[offset + 1] = (uint8_t) (reduce_digits(pos, 2) * 10);
-            d[offset + 2] = (uint8_t) (reduce_digits(pos, 4) * 10);
-            d[offset + 3] = (uint8_t) (reduce_digits(pos, 6) * 10);
-            d[offset + 4] = (uint8_t) (reduce_digits(pos, 8) * 10);
-            d[offset + 5] = (uint8_t) (reduce_digits(pos, 10) * 10);
-            d[offset + 6] = (uint8_t) (reduce_digits(pos, 12) * 10);
-            d[offset + 7] = (uint8_t) (reduce_digits(pos, 14) * 10);
-
-            /* d[offset + 0] = (uint8_t) (reduce_digits(acceleration, 0) * 10);
-            d[offset + 1] = (uint8_t) (reduce_digits(acceleration, 2) * 10);
-            d[offset + 2] = (uint8_t) (reduce_digits(acceleration, 4) * 10);
-            d[offset + 3] = (uint8_t) (reduce_digits(acceleration, 6) * 10);
-            d[offset + 4] = (uint8_t) (reduce_digits(acceleration, 8) * 10);
-            d[offset + 5] = (uint8_t) (reduce_digits(acceleration, 10) * 10);
-            d[offset + 6] = (uint8_t) (reduce_digits(acceleration, 12) * 10);
-            d[offset + 7] = (uint8_t) (reduce_digits(acceleration, 14) * 10); */
-
-            /* d[offset + 8] = (uint8_t) (((uint32_t) (pos_time / 100000000.0)) % 100);
-            d[offset + 9] = (uint8_t) (((uint32_t) (pos_time / 1000000.0)) % 100);
-            d[offset + 10] = (uint8_t) (((uint32_t) (pos_time / 10000.0)) % 100);
-            d[offset + 11] = (uint8_t) (((uint32_t) (pos_time / 100.0)) % 100);
-            d[offset + 12] = (uint8_t) (((uint32_t) (pos_time / 1.0)) % 100); */
-
-            /* uint8_t d[8*10]; uint8_t offset;
-            for (i = 0; i < 10; i += 1) {
-                offset = 8*i;
-                d[offset + 0] = (uint8_t) (reduce_digits(pos, 0) * 10);
-                d[offset + 1] = (uint8_t) (reduce_digits(pos, 2) * 10);
-                d[offset + 2] = (uint8_t) (reduce_digits(pos, 4) * 10);
-                d[offset + 3] = (uint8_t) (reduce_digits(pos, 6) * 10);
-                d[offset + 4] = (uint8_t) (reduce_digits(pos, 8) * 10);
-                d[offset + 5] = (uint8_t) (reduce_digits(pos, 10) * 10);
-                d[offset + 6] = (uint8_t) (reduce_digits(pos, 12) * 10);
-                d[offset + 7] = (uint8_t) (reduce_digits(pos, 14) * 10);
-            } */
-
-            // prepare packet. This loads the 32bit counter into the packet
+            // prepare packet
             app_vars.packet_len = sizeof(app_vars.packet);
+
+            union {
+              float flt;
+              unsigned char bytes[4];
+            } est_pos;
+
+            union {
+              float flt;
+              unsigned char bytes[4];
+            } est_vel;
+
+            union {
+              float flt;
+              unsigned char bytes[4];
+            } est_var;
+
+            uint8_t d[app_vars.packet_len];
+            est_pos.flt = pos;
+            est_vel.flt = x[1];
+            est_var.flt = P[1][1];
+
+            d[0] = est_pos.bytes[0];
+          	d[1] = est_pos.bytes[1];
+          	d[2] = est_pos.bytes[2];
+          	d[3] = est_pos.bytes[3];
+
+            d[4] = 0x69; // dummy byte so rx doesn't consider a valid control packet
+
+            d[5] = est_vel.bytes[0];
+            d[6] = est_vel.bytes[1];
+            d[7] = est_vel.bytes[2];
+            d[8] = est_vel.bytes[3];
+
+            d[9] = est_var.bytes[0];
+            d[10] = est_var.bytes[1];
+            d[11] = est_var.bytes[2];
+            d[12] = est_var.bytes[3];
+
             for (i=0;i<app_vars.packet_len;i++) {
                 app_vars.packet[i] = d[i];
             }
@@ -1306,6 +1297,8 @@ int mote_main(void) {
             // should transmit pose
             IntDisable(gptmFallingEdgeInt); enabled = false;
 
+            // leds_all_off();
+
             if (tx_count == 0) {
                 radio_rfOn();
                 radio_setFrequency(CHANNEL); // multichannel
@@ -1324,8 +1317,10 @@ int mote_main(void) {
 
             // sent packet contains the left and right sensor states
             if(moving_right){
+                leds_all_on();
                 app_vars.packet[0] = 0xFF;
             }else{
+                leds_all_off();
                 app_vars.packet[0] = 0xAA;
             }
 
@@ -1374,7 +1369,7 @@ void pulse_handler_gpio_a(void) {
 
         test_count += 1;
 
-        azimuth = loc.phi - PI/2.0; new_data = true; update = true; send_est = true;
+        azimuth = loc.phi - PI/2.0; new_data = true; update = true;
 
         time = TimerValueGet(gptmTimerBase, GPTIMER_A) - init_time;
         if (!init_time_set) {
@@ -1415,6 +1410,7 @@ void cb_endFrame(PORT_TIMER_WIDTH timestamp) {
 void cb_timer(void) {
    // set flag
    imu_ready = true;
+   send_est = true;
    
    sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
 }

@@ -206,11 +206,11 @@ int mote_main(void) {
         app_vars.uart_done          = 0;
         app_vars.uart_lastTxByte    = 0;
 
-        packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xAC) && (app_vars.rxpk_buf[5] == 0xAC)  && (app_vars.rxpk_buf[6] == 0xA5) && (app_vars.rxpk_buf[7] == 0xB1));
-        //	  packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xBD) && (app_vars.rxpk_buf[5] == 0xBD)  && (app_vars.rxpk_buf[6] == 0xB6) && (app_vars.rxpk_buf[7] == 0xC2));
+        // packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xAC) && (app_vars.rxpk_buf[5] == 0xAC)  && (app_vars.rxpk_buf[6] == 0xA5) && (app_vars.rxpk_buf[7] == 0xB1));
+        packet_valid = ((app_vars.rxpk_crc != 0) && (app_vars.rxpk_buf[4] == 0xBD) && (app_vars.rxpk_buf[5] == 0xBD)  && (app_vars.rxpk_buf[6] == 0xB6) && (app_vars.rxpk_buf[7] == 0xC2));
         if(packet_valid){
             //set left output pin high
-            if((app_vars.rxpk_buf[0] == 0xFF)){ // FIXME: why one of these isn't lighting up...
+            if((app_vars.rxpk_buf[0] == 0xFF)){
                 leds_sync_on();
                 GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_2,GPIO_PIN_2);
                 GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,GPIO_PIN_0);
@@ -238,11 +238,10 @@ int mote_main(void) {
             //	   GPIOPinWrite(GPIO_A_BASE,GPIO_PIN_2,0);
 
         } else {
-            mimsyPrintf("%u, %d, %d, %d, %d, %d, %d, %d, %d\r", time, app_vars.rxpk_buf[0], app_vars.rxpk_buf[1],
-                        app_vars.rxpk_buf[2], app_vars.rxpk_buf[3],
-                        app_vars.rxpk_buf[4], app_vars.rxpk_buf[5],
-                        app_vars.rxpk_buf[6], app_vars.rxpk_buf[7]
-                        ); // TODO: store every 500 in a list and print it out
+            mimsyPrintf("%u, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x\r", time,
+                        app_vars.rxpk_buf[0], app_vars.rxpk_buf[1], app_vars.rxpk_buf[2], app_vars.rxpk_buf[3], // pos
+                        app_vars.rxpk_buf[5], app_vars.rxpk_buf[6], app_vars.rxpk_buf[7], app_vars.rxpk_buf[8], // vel (skip rx dummy bit)
+                        app_vars.rxpk_buf[9], app_vars.rxpk_buf[10], app_vars.rxpk_buf[11], app_vars.rxpk_buf[12]); // covariance
         }
     }
 }
