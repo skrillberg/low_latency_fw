@@ -1188,7 +1188,7 @@ int mote_main(void) {
             // }
         }
 
-        if (!control_flag && send_est && !transmitting) { // if control_flag set, wait till next round to transmit
+        /* if (!control_flag && send_est && !transmitting) { // if control_flag set, wait till next round to transmit
             send_est = false;
             app_vars.flags |= APP_FLAG_TIMER;
 
@@ -1248,7 +1248,7 @@ int mote_main(void) {
 
             IntEnable(gptmFallingEdgeInt);
             enabled = true;
-        }
+        } */
 
         //==== APP_FLAG_START_FRAME (TX or RX)
         if (app_vars.flags & APP_FLAG_START_FRAME) {
@@ -1300,7 +1300,7 @@ int mote_main(void) {
             // prepare packet. This loads the 32bit counter into the packet
             app_vars.packet_len = sizeof(app_vars.packet);
             for (i=0;i<app_vars.packet_len;i++) {
-                if (i<4) {
+                if (i<5) {
                     app_vars.packet[i]=0;
                 } else {
                     app_vars.packet[i] = passphrase[i-4];
@@ -1315,6 +1315,18 @@ int mote_main(void) {
                 leds_all_off();
                 app_vars.packet[0] = 0xAA;
             }
+
+            union {
+              float flt;
+              unsigned char bytes[4];
+            } est_pos;
+
+            est_pos.flt = pos;
+
+            app_vars.packet[1] = est_pos.bytes[0];
+            app_vars.packet[2] = est_pos.bytes[1];
+            app_vars.packet[3] = est_pos.bytes[2];
+            app_vars.packet[4] = est_pos.bytes[3];
 
             tx_packet_count += 1;
 
@@ -1402,7 +1414,7 @@ void cb_endFrame(PORT_TIMER_WIDTH timestamp) {
 void cb_timer(void) {
    // set flag
    imu_ready = true;
-   send_est = true;
+   // send_est = true;
    
    sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
 }
