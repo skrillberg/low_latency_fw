@@ -169,6 +169,8 @@ int mote_main(void) {
 
     bool first = true; uint32_t init_time = 0; uint32_t time = 0;
 
+    leds_all_toggle();
+
     while (1) {
         /*Added by SY*/
         //	   memset(&app_vars,0,sizeof(app_vars_t));
@@ -238,10 +240,11 @@ int mote_main(void) {
             //	   GPIOPinWrite(GPIO_A_BASE,GPIO_PIN_2,0);
 
         } else {
-            mimsyPrintf("%u, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x, %x\r", time,
+            mimsyPrintf("%u, %x, %x, %x, %x, %x, %x, %x, %x\r", time,
                         app_vars.rxpk_buf[0], app_vars.rxpk_buf[1], app_vars.rxpk_buf[2], app_vars.rxpk_buf[3], // pos
-                        app_vars.rxpk_buf[5], app_vars.rxpk_buf[6], app_vars.rxpk_buf[7], app_vars.rxpk_buf[8], // vel (skip rx dummy bit)
-                        app_vars.rxpk_buf[9], app_vars.rxpk_buf[10], app_vars.rxpk_buf[11], app_vars.rxpk_buf[12]); // covariance
+                        app_vars.rxpk_buf[4], app_vars.rxpk_buf[5], app_vars.rxpk_buf[6], app_vars.rxpk_buf[7]); // vel (skip rx dummy bit)
+
+            leds_all_toggle();
         }
     }
 }

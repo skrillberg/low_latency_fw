@@ -200,9 +200,11 @@ volatile uint32_t prev_time; volatile uint32_t time;
 volatile uint32_t init_time; volatile bool init_time_set;
 volatile bool send_est;
 
+double max_dt;
+
 // EKF
-static const double DISTANCE_M = 2.24792; // FIXME: calibrate
-static const double DT = 1.0/125.0; // FIXME: this is just the IMU update rate
+static const double DISTANCE_M = 2.2098; // FIXME: calibrate
+static const double DT = 1.0/128.2; // FIXME: this is just the IMU update rate
 
 double x[NUM_STATES];     // state vector 
 
@@ -985,7 +987,7 @@ void configure_ekf() {
     H[0][0] = DISTANCE_M / ((DISTANCE_M * DISTANCE_M) + (initial_x * initial_x));
     H[0][1] = 0;
 
-    R[0][0] = LH_RAD_VAR * LH_RAD_VAR;
+    R[0][0] = LH_RAD_VAR;
     P[0][0] = 0.1; P[1][1] = 0.1;
 
     x[0] = initial_x; // position
@@ -1045,7 +1047,7 @@ int ekf_step(double z, double dt) {
     double g1 = G[0][0]; double g2 = G[1][0];
 
     P[0][0] = (1-(g1*l))*a; P[0][1] = (1-(g1*l))*b;
-    P[1][0] = (g2*l*a) + c; P[1][1] = (g2*l*b) + d;
+    P[1][0] = c - (g2*l*a); P[1][1] = d - (g2*l*b);
 
     return 0;
 }
@@ -1152,7 +1154,7 @@ int mote_main(void) {
             }
             prev_time = curr_time;
 
-            acceleration = -accel[0];
+            acceleration = accel[0];
 
             model(0, dt); // FIXME: acceleration
 
@@ -1167,9 +1169,9 @@ int mote_main(void) {
         if (new_data && !transmitting) {// TODO: still update ekf/position estimate when transmitting??? move if transmitting return inside
             new_data = false;
 
-            // TODO: update positions & ignore velocities     
-            // double pos = ekf.x[0];
-            pos = my_atan(x[0]); pos_time = time;
+            // TODO: update positions & ignore velocities
+            pos = azimuth; // my_atan(x[0] / DISTANCE_M); // azimuth
+            pos_time = time;
 
             // send packet with azimuth data
 
@@ -1187,7 +1189,7 @@ int mote_main(void) {
         }
 
         if (!control_flag && send_est && !transmitting) { // if control_flag set, wait till next round to transmit
-            send_est = false; // if array done being emptied, else keep going
+            send_est = false;
             app_vars.flags |= APP_FLAG_TIMER;
 
             // should transmit pose
@@ -1202,9 +1204,6 @@ int mote_main(void) {
             // (i.e. 3.141592653589793 --> 31, 41, 59, 26, 53, 58, 97, 93)
             // and send over TxChannel
 
-            // prepare packet
-            app_vars.packet_len = sizeof(app_vars.packet);
-
             union {
               float flt;
               unsigned char bytes[4];
@@ -1215,33 +1214,26 @@ int mote_main(void) {
               unsigned char bytes[4];
             } est_vel;
 
-            union {
-              float flt;
-              unsigned char bytes[4];
-            } est_var;
-
-            uint8_t d[app_vars.packet_len];
+            uint8_t d[8+5];
             est_pos.flt = pos;
-            est_vel.flt = x[1];
-            est_var.flt = P[1][1];
+            if (moving_right) {
+                est_vel.flt = 1.0;
+            } else {
+                est_vel.flt = 0.0;
+            }
 
             d[0] = est_pos.bytes[0];
           	d[1] = est_pos.bytes[1];
           	d[2] = est_pos.bytes[2];
           	d[3] = est_pos.bytes[3];
 
-            d[4] = 0x69; // dummy byte so rx doesn't consider a valid control packet
+            d[4] = est_vel.bytes[0];
+            d[5] = est_vel.bytes[1];
+            d[6] = est_vel.bytes[2];
+            d[7] = est_vel.bytes[3];
 
-            d[5] = est_vel.bytes[0];
-            d[6] = est_vel.bytes[1];
-            d[7] = est_vel.bytes[2];
-            d[8] = est_vel.bytes[3];
-
-            d[9] = est_var.bytes[0];
-            d[10] = est_var.bytes[1];
-            d[11] = est_var.bytes[2];
-            d[12] = est_var.bytes[3];
-
+            // prepare packet
+            app_vars.packet_len = sizeof(app_vars.packet);
             for (i=0;i<app_vars.packet_len;i++) {
                 app_vars.packet[i] = d[i];
             }
