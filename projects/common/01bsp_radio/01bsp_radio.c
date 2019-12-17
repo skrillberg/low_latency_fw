@@ -48,7 +48,7 @@ end of frame event), it will turn on its error LED.
 
 #define LENGTH_PACKET   8+LENGTH_CRC ///< maximum length is 127 bytes --> TODO: use 100
 #define CHANNEL         16             ///< 11=2.405GHz
-#define TIMER_PERIOD    0xff         ///< 0xff ~ 125 Hz < 0x3ff ~ 30 Hz < 0x7fff ~ 1 Hz
+#define TIMER_PERIOD    0x1f         ///< 0xff ~ 125 Hz < 0x3ff ~ 30 Hz < 0x7fff ~ 1 Hz
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
 #define NUM_ATTEMPTS	3	       ///<number of times packet is resent, needs to match number of motes for multichan experiments
@@ -68,8 +68,8 @@ end of frame event), it will turn on its error LED.
 #define CLOCK_SPEED_MHZ 32.0f
 #define MAX_SAMPLES 250
 
-#define LEFT_LIM .051f
-#define RIGHT_LIM -.049f
+#define LEFT_LIM 0.053835174195228319f
+#define RIGHT_LIM -0.055775000289031595f
 
 #define IMU_ADDRESS 0x69
 #define LOW_POWER 0
@@ -84,7 +84,7 @@ end of frame event), it will turn on its error LED.
 #define FLASH_PAGE_STORAGE_START 100 //first flash page to start at. TODO: make sure this doesn't overlap
 
 #define LH_RAD_VAR 0.00000001f
-#define ACCEL_G_VAR 0.1f
+#define ACCEL_G_VAR 0.3f
 #define NUM_STATES 2
 #define NUM_OBS 1
 
@@ -204,7 +204,7 @@ double max_dt;
 
 // EKF
 static const double DISTANCE_M = 2.2098; // FIXME: calibrate
-static const double DT = 1.0/128.2; // FIXME: this is just the IMU update rate
+static const double DT = ((double) TIMER_PERIOD) / 32768.0;
 
 double x[NUM_STATES];     // state vector 
 
@@ -219,7 +219,7 @@ double G[NUM_STATES][NUM_OBS];  // Kalman gain; a.k.a. K
 double F[NUM_STATES][NUM_STATES];  // Jacobian of process model 
 double H[NUM_OBS][NUM_STATES];  // Jacobian of measurement model 
 
-double fx[NUM_STATES];   // output of user defined f() state-transition function 
+// double fx[NUM_STATES];   // output of user defined f() state-transition function 
 double hx[NUM_OBS];   // output of user defined h() measurement function
 
 //=========================== prototypes ======================================
@@ -971,7 +971,6 @@ void ekf_zero() {
 
     H[0][0] = 0.0; H[0][1] = 0.0;
 
-    fx[0] = 0.0; fx[1] = 0.0;
     hx[0] = 0.0;
 }
 
@@ -996,18 +995,18 @@ void configure_ekf() {
 
 static void model(double accel, double dt) {
     /* Update process/dynamics model. */
-    fx[0] = x[0] + (dt * x[1]);
-    fx[1] = x[1] + (dt * accel);
+    x[0] = x[0] + (dt * x[1]);
+    x[1] = x[1] + (dt * accel);
 
     /* Update process Jacobian. */
     F[0][0] = 1; F[0][1] = dt;
     F[1][0] = 0; F[1][1] = 1;
 
     /* Update measurement model. */
-    hx[0] = my_atan(fx[0] / DISTANCE_M);
+    hx[0] = my_atan(x[0] / DISTANCE_M);
 
     /* Update measurement Jacobian. */
-    H[0][0] = DISTANCE_M / ((DISTANCE_M * DISTANCE_M) + (fx[0]*fx[0]));
+    H[0][0] = DISTANCE_M / ((DISTANCE_M * DISTANCE_M) + (x[0]*x[0]));
     H[0][1] = 0;
 }
 
@@ -1037,8 +1036,8 @@ int ekf_step(double z, double dt) {
 
     double innovation = z - hx[0];
 
-    x[0] = fx[0] + innovation * G[0][0];
-    x[1] = fx[1] + innovation * G[1][0];
+    x[0] = x[0] + innovation * G[0][0];
+    x[1] = x[1] + innovation * G[1][0];
 
     /* Updated Measurement Model Covariance Estimate */
     /* P_k = (I - G_k H_k) P_k */
@@ -1128,7 +1127,6 @@ int mote_main(void) {
     configure_pins();
     global_timer_init();
 
-    // TODO: what's up with this???
     // HWREG(RFCORE_XREG_RXENABLE) = 0; //disable rx
     // HWREG(RFCORE_XREG_FRMCTRL1) = HWREG(RFCORE_XREG_FRMCTRL1) & 0b110; //prevents stxon instruction from enabling rx, this is really important because it prevents tx motes from ever receiving anything
    
@@ -1139,6 +1137,9 @@ int mote_main(void) {
     send_est = false;
     bool control_flag = false;
     double pos; uint32_t pos_time; // TODO: make sure you're not overwriting when sending estimate
+
+    // TODO: calibrate accelerometer for 4.20 seconds
+
     while (true) {
         if (imu_ready || new_data) {
             imu_ready = false;
@@ -1154,7 +1155,7 @@ int mote_main(void) {
             }
             prev_time = curr_time;
 
-            acceleration = accel[0];
+            acceleration = accel[0] * 9.81;
 
             model(0, dt); // FIXME: acceleration
 
@@ -1163,14 +1164,14 @@ int mote_main(void) {
                     ekf_fail += 1;
                 }
                 update = false;
+                send_est = true;
             }
         }
 
         if (new_data && !transmitting) {// TODO: still update ekf/position estimate when transmitting??? move if transmitting return inside
             new_data = false;
 
-            // TODO: update positions & ignore velocities
-            pos = azimuth; // my_atan(x[0] / DISTANCE_M); // azimuth
+            pos = my_atan(x[0] / DISTANCE_M); // azimuth
             pos_time = time;
 
             // send packet with azimuth data
@@ -1188,7 +1189,7 @@ int mote_main(void) {
             // }
         }
 
-        /* if (!control_flag && send_est && !transmitting) { // if control_flag set, wait till next round to transmit
+        if (!control_flag && send_est && !transmitting) { // if control_flag set, wait till next round to transmit
             send_est = false;
             app_vars.flags |= APP_FLAG_TIMER;
 
@@ -1215,12 +1216,8 @@ int mote_main(void) {
             } est_vel;
 
             uint8_t d[8+5];
-            est_pos.flt = pos;
-            if (moving_right) {
-                est_vel.flt = 1.0;
-            } else {
-                est_vel.flt = 0.0;
-            }
+            est_pos.flt = azimuth;
+            est_vel.flt = pos;
 
             d[0] = est_pos.bytes[0];
           	d[1] = est_pos.bytes[1];
@@ -1248,7 +1245,7 @@ int mote_main(void) {
 
             IntEnable(gptmFallingEdgeInt);
             enabled = true;
-        } */
+        }
 
         //==== APP_FLAG_START_FRAME (TX or RX)
         if (app_vars.flags & APP_FLAG_START_FRAME) {
@@ -1309,10 +1306,10 @@ int mote_main(void) {
 
             // sent packet contains the left and right sensor states
             if(moving_right){
-                leds_all_on();
+                leds_all_off();
                 app_vars.packet[0] = 0xFF;
             }else{
-                leds_all_off();
+                leds_all_on();
                 app_vars.packet[0] = 0xAA;
             }
 

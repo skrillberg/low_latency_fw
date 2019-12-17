@@ -235,13 +235,17 @@ int mote_main(void) {
             GPIOPinWrite(GPIO_D_BASE, GPIO_PIN_0,0);
             leds_error_off();
 
-            mimsyPrintf("%u, %x, %x, %x, %x\r", time,
+            mimsyPrintf("%u, 1, %x, %x, %x, %x\r", time,
                         app_vars.rxpk_buf[1], app_vars.rxpk_buf[2], app_vars.rxpk_buf[3], app_vars.rxpk_buf[4]);
 
             /*Added by SY*/
             //      GPIOPinWrite(GPIO_A_BASE,GPIO_PIN_2,GPIO_PIN_2);
             memset(&app_vars,0,sizeof(app_vars_t));
             //	   GPIOPinWrite(GPIO_A_BASE,GPIO_PIN_2,0);
+        } else {
+            mimsyPrintf("%u, 0, %x, %x, %x, %x, %x, %x, %x, %x\r", time,
+                        app_vars.rxpk_buf[0], app_vars.rxpk_buf[1], app_vars.rxpk_buf[2], app_vars.rxpk_buf[3],
+                        app_vars.rxpk_buf[4], app_vars.rxpk_buf[5], app_vars.rxpk_buf[6], app_vars.rxpk_buf[7]);
         }
     }
 }
