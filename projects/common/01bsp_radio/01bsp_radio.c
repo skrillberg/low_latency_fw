@@ -48,7 +48,7 @@ end of frame event), it will turn on its error LED.
 
 #define LENGTH_PACKET   8+LENGTH_CRC ///< maximum length is 127 bytes --> TODO: use 100
 #define CHANNEL         16             ///< 11=2.405GHz
-#define TIMER_PERIOD    0x1f         ///< 0xff ~ 125 Hz < 0x3ff ~ 30 Hz < 0x7fff ~ 1 Hz
+#define TIMER_PERIOD    0x1f         ///< *0x1f ~ 1 kHz* < 0xff ~ 125 Hz < 0x3ff ~ 30 Hz < 0x7fff ~ 1 Hz
 #define ID              0xff           ///< byte sent in the packets
 #define isTx	true
 #define NUM_ATTEMPTS	3	       ///<number of times packet is resent, needs to match number of motes for multichan experiments
@@ -68,8 +68,8 @@ end of frame event), it will turn on its error LED.
 #define CLOCK_SPEED_MHZ 32.0f
 #define MAX_SAMPLES 250
 
-#define LEFT_LIM 0.053835174195228319f
-#define RIGHT_LIM -0.055775000289031595f
+#define LEFT_LIM 0.1f // 10 cm
+#define RIGHT_LIM -0.1f // -10 cm
 
 #define IMU_ADDRESS 0x69
 #define LOW_POWER 0
@@ -201,9 +201,10 @@ volatile uint32_t init_time; volatile bool init_time_set;
 volatile bool send_est;
 
 double max_dt;
+int update_count;
 
 // EKF
-static const double DISTANCE_M = 2.2098; // FIXME: calibrate
+static const double DISTANCE_M =  3.00;
 static const double DT = ((double) TIMER_PERIOD) / 32768.0;
 
 double x[NUM_STATES];     // state vector 
@@ -219,7 +220,6 @@ double G[NUM_STATES][NUM_OBS];  // Kalman gain; a.k.a. K
 double F[NUM_STATES][NUM_STATES];  // Jacobian of process model 
 double H[NUM_OBS][NUM_STATES];  // Jacobian of measurement model 
 
-// double fx[NUM_STATES];   // output of user defined f() state-transition function 
 double hx[NUM_OBS];   // output of user defined h() measurement function
 
 //=========================== prototypes ======================================
@@ -688,7 +688,7 @@ void imu_init(void) {
     i2c_read_byte(IMU_ADDRESS, byteptr);
 }
 
-void get_scalar_accel(double *accel, uint32_t *timestamp) { // FIXME: put back when done debugging, is there a way to have this service an interrupt?
+void get_scalar_accel(double *accel, uint32_t *timestamp) { // could have this service an interrupt but fine for 1kHz update
     uint8_t address = IMU_ADDRESS;
     uint8_t readbyte;  
     uint8_t *byteptr = &readbyte;
@@ -744,9 +744,12 @@ void get_scalar_accel(double *accel, uint32_t *timestamp) { // FIXME: put back w
     // x = ((double) ax) / 16000.0; y = ((double) ay) / 16000.0; z = ((double) az) / 16000.0;
     accel[0] = ((double) ax) / 16000.0;
     accel[1] = ((double) ay) / 16000.0;
-    accel[2] = ((double) az) / 16000.0; // TODO: debias from gravity using gyro readings?
+    accel[2] = ((double) az) / 16000.0; // could debias from gravity using gyro readings?
 }
 
+/**
+    Complementary filter between MPU-9250 IMU accelerometer and gyroscope data. Not currently used.
+*/
 void complementary_filter(short accelData[3], short gyroData[3], double *pitch, double *roll, double dt)
 {
     double pitch_acc, roll_acc;
@@ -785,6 +788,9 @@ void precision_timers_init(void){
     // TimerEnable(gptmPeriodTimerBase,GPTIMER_A);
 }
 
+/**
+    Initializes the DMA edge capture & falling edge lighthouse localization system.
+*/
 void input_edge_timers_init(void) {
     GPIOPinTypeTimer(GPIO_A_BASE,GPIO_PIN_2); // enables hw muxing of pin inputs
     GPIOPinTypeTimer(GPIO_A_BASE,GPIO_PIN_5); // enables hw muxing of pin inputs
@@ -950,7 +956,7 @@ void ekf_zero() {
     int i; int j;
 
     // x
-    x[0] = 0; x[1] = 0.0;     // state vector 
+    x[0] = 0; x[1] = 0.0; // state vector 
 
     for (i = 0; i < NUM_STATES; i += 1) {
         for (j = 0; j < NUM_STATES; j += 1) {
@@ -979,8 +985,6 @@ void configure_ekf() {
 
     const double initial_x = 0.0;
 
-    // const double Qk[2][2] = {{(S_a * S_a)*(DT*DT*DT*DT) / 4.0, (S_a * S_a)*(DT*DT*DT) / 2.0}, {(S_a * S_a)*(DT*DT*DT) / 2.0,            (S_a * S_a)*(DT*DT)}};
-
     // init covariances of state/measurement noise
     int i; int j;
     H[0][0] = DISTANCE_M / ((DISTANCE_M * DISTANCE_M) + (initial_x * initial_x));
@@ -1008,21 +1012,24 @@ static void model(double accel, double dt) {
     /* Update measurement Jacobian. */
     H[0][0] = DISTANCE_M / ((DISTANCE_M * DISTANCE_M) + (x[0]*x[0]));
     H[0][1] = 0;
-}
 
-int ekf_step(double z, double dt) {
-    /* Updated Process Covariance Estimate */ 
+    /* Updated Process Covariance Estimate */
     /* P_k = F_{k-1} P_{k-1} F^T_{k-1} + Q_{k-1} */
 
     double a; double b; double c; double d;
     a = P[0][0]; b = P[0][1]; c = P[1][0]; d = P[1][1];
 
     Pp[0][0] = a + (b * dt) + (c * dt) + (d * dt * dt); Pp[0][1] = b + d * dt;
-    Pp[1][0] = c + (d * dt); Pp[1][1] = d + (ACCEL_G_VAR * dt * dt);
-    
+    Pp[1][0] = c + (d * dt); Pp[1][1] = d + (ACCEL_G_VAR * ACCEL_G_VAR * dt * dt);
+
+    P[0][0] = Pp[0][0]; P[0][1] = Pp[0][1]; P[1][0] = Pp[1][0]; P[1][1] = Pp[1][1];
+}
+
+int ekf_step(double z, double dt) {
     /* Kalman Gain Computation */
     /* G_k = P_k H^T_k (H_k P_k H^T_k + R)^{-1} */
 
+    double a; double b; double c; double d;
     a = Pp[0][0]; b = Pp[0][1]; c = Pp[1][0]; d = Pp[1][1];
     double l = H[0][0]; double r = R[0][0];
     double denom = (a*l*l) + r;
@@ -1066,6 +1073,7 @@ void global_timer_init(void){
 \brief The program starts executing here.
 */
 int mote_main(void) {
+    update_count = 0;
 
     moving_right = true;
     transmitting = false;
@@ -1136,9 +1144,7 @@ int mote_main(void) {
 
     send_est = false;
     bool control_flag = false;
-    double pos; uint32_t pos_time; // TODO: make sure you're not overwriting when sending estimate
-
-    // TODO: calibrate accelerometer for 4.20 seconds
+    double pos; uint32_t pos_time;
 
     while (true) {
         if (imu_ready || new_data) {
@@ -1157,36 +1163,30 @@ int mote_main(void) {
 
             acceleration = accel[0] * 9.81;
 
-            model(0, dt); // FIXME: acceleration
+            model(acceleration, dt);
 
             if (update) {
                 if (ekf_step(azimuth, dt)) {
                     ekf_fail += 1;
                 }
                 update = false;
-                send_est = true;
             }
         }
 
-        if (new_data && !transmitting) {// TODO: still update ekf/position estimate when transmitting??? move if transmitting return inside
+        if (new_data && !transmitting) {
             new_data = false;
 
-            pos = my_atan(x[0] / DISTANCE_M); // azimuth
+            pos = x[0];
             pos_time = time;
 
             // send packet with azimuth data
 
-            if ((moving_right && (pos <= RIGHT_LIM)) || (!moving_right && (pos >= LEFT_LIM))) { // test with atan(LEFT_LIM_m), r_l_m
+            if ((moving_right && (pos <= RIGHT_LIM)) || (!moving_right && (pos >= LEFT_LIM))) {
                 transmitting = true; control_flag = true;
                 app_vars.flags |= APP_FLAG_TIMER;
                 rx_packet_count += 1;
+                rounds += 1;
             }
-
-            // if (imu_ready && !send_est) { // TODO: set flag here and do if statement on outer that handles ground truth transmission (don't break direction switch state machine while you're at it --> if most recent pos >= LIM, send switch signal with priority)
-                                    // TODO: while emptying this array, start filling another one with new pose data, and when done, copy over and empty that one (assume transmission is quick so you can disable interrupts when transmitting --> won't lose too many pulses, if any, I hope)
-                // TODO: make second timer for IMU reading that's different s.t. position transmissions only come on specified interval
-                // TODO: or actually just make it so that whenever array count is above 200 or sth you start sending shit
-            // }
         }
 
         if (!control_flag && send_est && !transmitting) { // if control_flag set, wait till next round to transmit
@@ -1216,8 +1216,8 @@ int mote_main(void) {
             } est_vel;
 
             uint8_t d[8+5];
-            est_pos.flt = azimuth;
-            est_vel.flt = pos;
+            est_pos.flt = pos;
+            est_vel.flt = x[1];
 
             d[0] = est_pos.bytes[0];
           	d[1] = est_pos.bytes[1];
@@ -1274,7 +1274,7 @@ int mote_main(void) {
                     moving_right = !moving_right;
                     IntEnable(gptmFallingEdgeInt); enabled = true;
                     // tx_packet_count += 1;
-                    // NOTE: incorporate Kalman velocity direction into this? prolly overkill bc shouldn't differ o/w undefined behavior
+                    // NOTE: could incorporate Kalman velocity direction into this (not necessary atm since state machine is stable)
                 }
             }
             // clear flag
@@ -1318,7 +1318,7 @@ int mote_main(void) {
               unsigned char bytes[4];
             } est_pos;
 
-            est_pos.flt = pos;
+            est_pos.flt = pos; // P[0][0]; // pos for position estimate, P[0][0] for EKF variance
 
             app_vars.packet[1] = est_pos.bytes[0];
             app_vars.packet[2] = est_pos.bytes[1];
@@ -1363,7 +1363,7 @@ void pulse_handler_gpio_a(void) {
             pulses_local[i-ptr].type = pulses[i%PULSE_TRACK_COUNT].type;
         }
 
-        pulse_count = 0; // TODO: maybe only do this if pulses are valid???
+        pulse_count = 0;
         // recover azimuth and elevation
         location_t loc = localize_mimsy(pulses_local);
         if (!loc.valid) { return; }
@@ -1376,17 +1376,15 @@ void pulse_handler_gpio_a(void) {
         if (!init_time_set) {
             init_time_set = true;
             init_time = time; time = 0;
-            // TODO: start hardware timer
-            // TODO: set overflow counter to 0, transmit that as well for python multiplication
             // led's on
-            leds_all_on(); // TODO: move later 
+            leds_all_on();
         }
         valid_angles[(int)samples][0] = loc.phi; valid_angles[(int)samples][1] = (double) time;
 
         elevation = azimuth * 180/PI;
 
         samples += 1;
-        if (samples >= MAX_SAMPLES) { // write to flash
+        if (samples >= MAX_SAMPLES) { // once enabled, write to flash, not implemented for now
             samples = 0;
         }
     }
@@ -1411,7 +1409,6 @@ void cb_endFrame(PORT_TIMER_WIDTH timestamp) {
 void cb_timer(void) {
    // set flag
    imu_ready = true;
-   // send_est = true;
    
    sctimer_setCompare(sctimer_readCounter()+TIMER_PERIOD);
 }
